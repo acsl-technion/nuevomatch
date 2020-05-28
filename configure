@@ -1,0 +1,177 @@
+#!/bin/bash
+
+# Check that all prerequisites are available
+
+error_status=0
+error_messages=
+
+function add_message() {
+	error_messages=$(echo -e "$@\n$error_messages")
+	error_status=1
+}
+
+# Check python version
+echo -n "Checking python version... "
+python_version=$( /usr/bin/env python3 --version | cut -d " " -f 2 )
+if (( $? != 0)); then
+  echo "error"
+  add_message "Cannot get version of python3."
+
+else
+  echo "ok"
+fi
+
+python35_okay=$( echo $python_version | awk '$1 >= 3.5 {print 1}' )
+python36_okay=$( echo $python_version | awk '$1 >= 3.6 {print 1}' )
+
+if [[ $python35_okay != 1 ]]; then
+  echo "Warning: Python version should be at least 3.5"
+fi
+
+# Set the python-dev include path
+echo -n "Checking for python include path... "
+if [[ $python36_okay ]]; then
+	export python_include_path=/usr/include/python3.6
+else
+	export python_include_path=/usr/include/python3.5
+fi
+
+if [[ ! -d $python_include_path ]]; then
+	echo "error"
+	add_message "Python include directory ($python_include_path) is missing. Make sure the python-dev package is installed."
+else
+	echo "ok"
+fi
+
+# Check whether python-dev is installed
+echo -n "Checking whether python-dev is available on machine... "
+if [[ ! -e $python_include_path/Python.h ]]; then
+	echo "error"
+	add_message "Cannot access file '$python_include_path/Python.h'. Make sure the python-dev package is installed."
+else
+	echo "ok"
+fi
+
+# Python prerequisites
+libraries=( tensorflow numpy distutils matplotlib )
+for lib in ${libraries[@]}; do
+	echo -n "Checking Python prerequisite '$lib'... "
+	python -c "import $lib" &> /dev/null
+	if [[ $? != 0 ]]; then
+		echo "error"
+		add_message "Cannot import python library $lib. Make sure it is installed."
+
+	else
+		echo "ok"
+	fi
+done
+
+# FMA support
+echo -n "Checking for AVX2/FMA support... "
+if [[ $(grep fma /proc/cpuinfo | wc -l) -eq 0 ]]; then
+	echo "error"
+	add_message "CPU does not support AVX2/FMA extensions."
+else
+	echo "ok"
+fi
+
+# G++ Available
+echo -n "Checking whether g++ is available... "
+if [[ $(which g++ | wc -l) -eq 0 ]]; then
+	echo "error"
+	add_message "g++ was not found on the system."
+else
+	echo "ok"
+fi
+
+
+# Make Bin directory and sub-makefiles
+BIN_DIR=$(dirname $0)/bin
+mkdir -p $BIN_DIR 2>/dev/null
+
+echo -n "Generating sub-makefiles..."
+
+files="$(find src/ -name "*.cpp") "
+files+="$(find tools/ -name "*.cpp") "
+logfile=$BIN_DIR/makefile.log
+
+function generate_makefile() {
+	name=$(basename $1)
+	filename="${name%.*}"
+	g++ -mavx2 -mfma -I./include/ -MM $1 > $BIN_DIR/$filename.mk
+	sed -i "s@^\(.*\.o\):@$BIN_DIR/\1:@" $BIN_DIR/$filename.mk
+	echo -e "\t\$(CXX) \$(CXXFLAGS) \$(SIMDFLAGS) \$(DBGFLAGS) \$(INCLUDES) \$(LIBRARIES) " \
+	     "-c $1 -o $BIN_DIR/$filename.o\n" >> $BIN_DIR/$filename.mk	
+}
+
+flag=0
+for f in $files; do
+	generate_makefile $f 2>$logfile
+	if [[ $? -ne 0 ]]; then
+		echo "error"
+		add_message "Error generating sub-makefiles. See '$logfile' for details."
+		flag=1
+		break
+	fi
+done
+
+if [[ $flag -eq 0 ]]; then
+	# Merge all sub-makefiles
+	sub_files=$(ls $BIN_DIR/*.mk | grep -v "objects.mk")
+	cat $sub_files > $BIN_DIR/objects.mk
+	echo "$sub_files" | xargs rm -f
+	echo "ok"
+fi
+
+# Clone TupleMerge and compile it
+
+my_dir=$PWD
+tuplemerge_dir=tuplemerge
+
+if [[ ! -d $tuplemerge_dir ]]; then
+	echo -n "Cloning TupleMerge from GitHub... "
+	git clone https://github.com/drjdaly/tuplemerge $tuplemerge_dir &> /dev/null
+	cd $tuplemerge_dir
+	git checkout tags/v1.0 &> /dev/null
+	cd $my_dir
+	echo "ok"
+fi
+
+
+echo -n "Compiling TupleMerge... "
+logfile=$tuplemerge_dir/errors.log
+make -C $tuplemerge_dir -j &> $logfile
+if [[ $? -ne 0 ]]; then
+	echo "error"
+	add_message "Error compiling TupleMerge. See '$logfile' for deatils."
+else
+	echo "ok"
+fi
+
+echo -n "Creating libtuplemerge.a... "
+logfile=$tuplemerge_dir/libtuplemerge.log
+ar crf $BIN_DIR/libtuplemerge.a \
+	$tuplemerge_dir/cmap.o \
+	$tuplemerge_dir/TupleSpaceSearch.o \
+	$tuplemerge_dir/TupleMergeOnline.o \
+	$tuplemerge_dir/TupleMergeOffline.o \
+	$tuplemerge_dir/SlottedTable.o \
+	$tuplemerge_dir/Simulation.o \
+	$tuplemerge_dir/MapExtensions.o 2> $logfile
+if [[ $? -ne 0 ]]; then
+	echo "error"
+	add_message "Could not generate libtuplemerge.a. See '$logfile' for deatils."
+else
+	echo "ok"
+fi
+
+echo "======="
+# Print status
+if [[ $error_status == 1 ]]; then
+	echo "Configure has failed due to the following reasons:"
+	echo "$error_messages"
+	echo "FAIL"
+	exit 1
+else
+	echo "Configure completed successfully. Run make -f to compile NuevoMatch."
+fi
