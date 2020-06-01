@@ -13,6 +13,7 @@
 #include <math.h>
 #include <assert.h>
 #include <queue>
+#include <stack>
 #include <list>
 #include <sys/time.h>
 
@@ -110,6 +111,7 @@ void CutSplitTrie::createtrie() {
    new_node->layer_number = 1;
    new_node->flag = CUT;
    new_node->rootnode = nullptr;
+   new_node->max_priority = -1;
 
    // Reset root fields to all rule-space
    // TODO - this is a bit awkward. Fix.
@@ -205,6 +207,7 @@ void CutSplitTrie::createtrie() {
 			   new_node->is_leaf = rule_id.size() < binth;
 			   new_node->flag = (num_partitions < MAXCUTS) ? SPLIT : CUT;
 			   new_node->rule_indices = vector_to_array(rule_id);
+			   new_node->max_priority = -1;
 			   new_node->rootnode = nullptr;
 
 			   // Update max layers
@@ -249,6 +252,62 @@ void CutSplitTrie::createtrie() {
 		   max_depth=MAX(max_depth, current_node->layer_number);
        }
    }
+
+   // Calculate the max priorities of all nodes (DFS)
+   stack<int> node_stack;
+   node_stack.push(0);
+   while (!node_stack.empty()) {
+	   node_t* current = nodes[node_stack.top()];
+	   // In case the current node has already priority
+	   if (current->max_priority > 0) {
+		   node_stack.pop();
+		   continue;
+	   }
+	   // In case this node is leaf
+	   else if (current->is_leaf) {
+		   int max_priority = 0x7fffffff;
+		   for (int i=0; i<current->num_of_rules; ++i) {
+			   matching_rule* rule = &rule_db[current->rule_indices[i]];
+			   max_priority = std::min(max_priority, (int)rule->priority);
+		   }
+		   current->max_priority = max_priority;
+		   node_stack.pop();
+	   }
+	   // In case the child nodes of this should be processed
+	   else if (current->max_priority == -1) {
+		   // In case the current node is CUT
+		   if (current->flag == CUT) {
+				for (uint32_t j=0; j<current->num_of_cuts; ++j) {
+					uint32_t child_idx = current->child_indices[j];
+					if (child_idx != MAX_UINT) node_stack.push(child_idx);
+				}
+				current->max_priority = -2;
+		   }
+		   // In case of split
+		   else {
+				if (current->rootnode != nullptr) {					
+					current->max_priority = current->rootnode->max_priority;
+				} else {
+					current->max_priority = 0;
+				}
+			   node_stack.pop();
+		   }
+	   }
+	   // The childs of this were already processed
+	   else if (current->max_priority == -2) {
+		   int max_priority = 0x7fffffff;
+		   for (uint32_t j=0; j<current->num_of_cuts; ++j) {
+			   uint32_t child_idx = current->child_indices[j];
+			   if (child_idx != MAX_UINT) {
+				   node_t* child = nodes[current->child_indices[j]];
+				   max_priority = std::min(max_priority, child->max_priority);
+			   }
+		   }
+		   current->max_priority = max_priority;
+		   node_stack.pop();
+	   }
+   }
+
    // Convert the node vector to array
    node_set = vector_to_array(nodes);
    total_nodes = node_idx;
@@ -356,19 +415,9 @@ rule_set_t* get_hyper_split_rules(uint32_t num_of_rules, matching_rule* rule_db,
  * @brief Perform packet lookup
  * @param header The packet header
  */
-int CutSplitTrie::lookup(const uint32_t* header) {
-
-#ifdef MICRO_PERFORMANCE_TEST
-	struct timespec start_time, end_time, linear_start;
-	bool measure = measure_performance;
-	if (measure) {
-		clock_gettime(CLOCK_MONOTONIC, &start_time);
-		++num_of_packets;
-	}
-#endif
-
+int CutSplitTrie::lookup(const uint32_t* header, int priority) {
 	// Not found is the default
-	int result = -1;
+	int result = priority;
 
 	// Initiate the bits in field
 	int current_bit = field_width[dimension];
@@ -377,6 +426,10 @@ int CutSplitTrie::lookup(const uint32_t* header) {
     node_t* current_node = &node_set[0];
     // Traverse until reaching a leaf
     while(!current_node->is_leaf){
+
+    	// Stop in case the priority is higher
+    	// than the maximum of the current node
+    	if ( (priority >= 0) && (priority < current_node->max_priority) ) return priority;
 
     	uint32_t num_of_bits = get_nbits(current_node->num_of_cuts);
 
@@ -393,13 +446,7 @@ int CutSplitTrie::lookup(const uint32_t* header) {
 
 		// In case no relevant child, return not-found
         if (child_index == MAX_UINT) {
-#ifdef MICRO_PERFORMANCE_TEST
-        	if (measure) {
-        		clock_gettime(CLOCK_MONOTONIC, &linear_start);
-        		max_linear_rules = std::max(max_linear_rules, current_node->num_of_rules);
-        	}
-#endif
-        	return -1;
+        	return priority;
         }
 
         // Update the current node
@@ -407,16 +454,7 @@ int CutSplitTrie::lookup(const uint32_t* header) {
 
         // In case the current node is SPLIT (HyperSplit) and not a leaf
         if (current_node->flag == SPLIT && !current_node->is_leaf) {
-        	result = LookupHSTree(current_node->rootnode, header);
-
-#ifdef MICRO_PERFORMANCE_TEST
-        	if (measure) {
-        		clock_gettime(CLOCK_MONOTONIC, &end_time);
-        		split_work_time_ns  += (end_time.tv_sec - start_time.tv_sec) * 1e9 + (end_time.tv_nsec - start_time.tv_nsec);
-        		++split_lookups;
-        	}
-#endif
-
+        	result = LookupHSTree(current_node->rootnode, header, priority);
             // Return the result
             return result;
         }
@@ -424,14 +462,6 @@ int CutSplitTrie::lookup(const uint32_t* header) {
         // Update the current bit
         current_bit-= num_of_bits;
     }
-
-#ifdef MICRO_PERFORMANCE_TEST
-	if (measure) {
-		clock_gettime(CLOCK_MONOTONIC, &linear_start);
-		max_linear_rules = std::max(max_linear_rules, current_node->num_of_rules);
-	}
-#endif
-
     // Go over all rules
     for(uint32_t i=0; i<current_node->num_of_rules; ++i){
     	matching_rule* current_rule = &rule_db[current_node->rule_indices[i]];
@@ -449,13 +479,6 @@ int CutSplitTrie::lookup(const uint32_t* header) {
     		break;
     	}
     }
-#ifdef MICRO_PERFORMANCE_TEST
-	if (measure) {
-		clock_gettime(CLOCK_MONOTONIC, &end_time);
-		work_time_ns  += (end_time.tv_sec - start_time.tv_sec) * 1e9 + (end_time.tv_nsec - start_time.tv_nsec);
-		linear_rule_time += (end_time.tv_sec - linear_start.tv_sec) * 1e9 + (end_time.tv_nsec - linear_start.tv_nsec);
-	}
-#endif
     // Return the result
     return result;
 }
@@ -509,6 +532,7 @@ ObjectPacker CutSplitTrie::pack() {
 	return output;
 }
 
+
 /**
  * @brief Unpack trie from buffer
  * @return 1 on success, otherwise 0
@@ -547,6 +571,7 @@ int CutSplitTrie::unpack(ObjectReader& reader) {
 		reader >> node_set[i].is_leaf;
 		node_set[i].rootnode = nullptr;
 		node_set[i].child_indices = nullptr;
+		node_set[i].max_priority = -1;
 
 		// Read the rules of the current node
 		node_set[i].rule_indices = new uint32_t[node_set[i].num_of_rules];
@@ -569,6 +594,61 @@ int CutSplitTrie::unpack(ObjectReader& reader) {
 			reader >> sub_reader;
 			node_set[i].rootnode = HyperSplitTrie_unpack(sub_reader);
 		}
+	}
+
+	// Calculate the max priorities of all nodes (DFS)
+	stack<int> node_stack;
+	node_stack.push(0);
+	while (!node_stack.empty()) {
+	   node_t* current = &node_set[node_stack.top()];
+	   // In case the current node has already priority
+	   if (current->max_priority > 0) {
+		   node_stack.pop();
+		   continue;
+	   }
+	   // In case this node is leaf
+	   else if (current->is_leaf) {
+		   int max_priority = 0x7fffffff;
+		   for (int i=0; i<current->num_of_rules; ++i) {
+			   matching_rule* rule = &rule_db[current->rule_indices[i]];
+			   max_priority = std::min(max_priority, (int)rule->priority);
+		   }
+		   current->max_priority = max_priority;
+		   node_stack.pop();
+	   }
+	   // In case the child nodes of this should be processed
+	   else if (current->max_priority == -1) {
+		   // In case the current node is CUT
+		   if (current->flag == CUT) {
+				for (uint32_t j=0; j<current->num_of_cuts; ++j) {
+					uint32_t child_idx = current->child_indices[j];
+					if (child_idx != MAX_UINT) node_stack.push(child_idx);
+				}
+				current->max_priority = -2;
+		   }
+		   // In case of split
+		   else {
+			  	if (current->rootnode != nullptr) {					
+					current->max_priority = current->rootnode->max_priority;
+				} else {
+					current->max_priority = 0;
+				}
+			   node_stack.pop();
+		   }
+	   }
+	   // The childs of this were already processed
+	   else if (current->max_priority == -2) {
+		   int max_priority = 0x7fffffff;
+		   for (uint32_t j=0; j<current->num_of_cuts; ++j) {
+			   uint32_t child_idx = current->child_indices[j];
+			   if (child_idx != MAX_UINT) {
+				   node_t* child = &node_set[current->child_indices[j]];
+				   max_priority = std::min(max_priority, child->max_priority);
+			   }
+		   }
+		   current->max_priority = max_priority;
+		   node_stack.pop();
+	   }
 	}
 
 	return 1;
@@ -720,11 +800,11 @@ int CutSplit::build(const std::list<openflow_rule>& rules) {
  * @param header An array of 32bit integers according to the number of supported fields.
  * @returns The matching rule action/priority (or 0xffffffff if not found)
  */
-uint32_t CutSplit::classify_sync(const uint32_t* header) {
+uint32_t CutSplit::classify_sync(const uint32_t* header, int priority) {
 
 	int match_id = -1;
-	int match_sa = tree_sa->lookup(header);
-	int match_da = tree_da->lookup(header);
+	int match_sa = tree_sa->lookup(header, priority);
+	int match_da = tree_da->lookup(header, priority);
 	int match_big = -1;
 
 
@@ -739,7 +819,7 @@ uint32_t CutSplit::classify_sync(const uint32_t* header) {
 #endif
 
 		// Perform classification
-		match_big = LookupHSTree(&tree_big, header);
+		match_big = LookupHSTree(&tree_big, header, priority);
 
 #ifdef MICRO_PERFORMANCE_TEST
 		// Measure time for big tree classification
@@ -765,14 +845,14 @@ uint32_t CutSplit::classify_sync(const uint32_t* header) {
  * @param header An array of 32bit integers according to the number of supported fields.
  * @returns A unique id for the packet
  */
-uint32_t CutSplit::classify_async(const unsigned int* header) {
+uint32_t CutSplit::classify_async(const unsigned int* header, int priority) {
 	uint32_t match_id = -1;
 	uint32_t packet_id = 0xffffffff;
 
 	// Lookup only valid packets
 	if (header != nullptr) {
 		// Perform lookup
-		match_id = classify_sync(header);
+		match_id = classify_sync(header, priority);
 		packet_id = _packet_counter++;
 	}
 

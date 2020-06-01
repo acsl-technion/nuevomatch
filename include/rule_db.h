@@ -113,6 +113,7 @@ struct matching_rule {
 struct openflow_rule {
 	unsigned int priority;
 	std::vector<range> fields;
+	std::vector<uint32_t> prefixes; // Used for hash-based algos, such as TM
 
 	openflow_rule() : priority(0) {};
 
@@ -146,14 +147,14 @@ typedef enum { UNKNOWN = 0, CLASSBENCH, CLASSBENCHNG, BINARY } ruleset_type_t;
 /**
  * @brief Loads rules database (as generated using NuevoMatch) from memory
  * @param reader An object-reader with binary data
- * @return A pointer to rule table
+ * @return A list of open-flow rules
  */
 std::list<openflow_rule> load_rule_database(ObjectReader& reader);
 
 /**
  * @brief Reads Classbench file into rule_table_t data structure
  * @param filename Path to Classbench file
- * @return Pointer to the rule-table
+ * @return A list of open-flow rules
  * @throws In case of an error
  */
 std::list<openflow_rule> read_classbench_file(const char* filename);
@@ -161,7 +162,7 @@ std::list<openflow_rule> read_classbench_file(const char* filename);
 /**
  * @brief Reads Classbench-ng file with OpenFlow 1.0 rules
  * @param filename Path to Classbench-ng file
- * @return Pointer to the rule-table, or NULL in case of an error
+ * @return A list of open-flow rules
  * @note The resulting rule-table has at most 9 fields
  */
 std::list<openflow_rule> read_classbench_ng_file(const char* filename);
@@ -192,7 +193,7 @@ std::list<openflow_rule> apply_indices_on_ruleset(std::list<openflow_rule>& rule
  * @brief Reads a ruleset indices file and return a set with all indices available in file
  * @param reader An object-reader with binary data
  */
-std::set<uint32_t> load_indices_database(ObjectReader& reader);
+std::set<uint32_t> read_indices_file(ObjectReader& reader);
 
 /**
  * @brief Reads a textual trace file into memory

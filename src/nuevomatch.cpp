@@ -143,51 +143,69 @@ void NuevoMatch<N>::reset_counters() {
 }
 
 /**
+ * @brief Advance the packet counter. Should be used when skipping 
+ * classification of packets, such as with caches.
+ */
+template <uint32_t N>
+void NuevoMatch<N>::advance_counter() { 
+	_packet_counter++;
+}
+
+/**
  * @brief Start an asynchronous process of classification for an input packet.
  * @param header An array of 32bit integers according to the number of supported fields.
  * @returns A unique id for the packet
  */
 template <uint32_t N>
-uint32_t NuevoMatch<N>::classify_async(const uint32_t* header) {
+uint32_t NuevoMatch<N>::classify_async(const uint32_t* header, int priority) {
 
 	// Build next batch
 	if (header != NULL) {
-		_next_batch[_next_batch_items++] = header;
+		uint32_t batch_modulo = _batch_counter & (_configuration.queue_size - 1);
+		_next_batch[_next_batch_items] = header;
+		_reducer[batch_modulo].packet_id[_next_batch_items] = _packet_counter;
+		_next_batch_items++;
 	}
 
-	// In case the batch is full
 	if (header == NULL || _next_batch_items == N) {
-
-		// Invalidate remaining packets in batch
-		for (uint32_t i=_next_batch_items; i<N; ++i) {
-			_next_batch[i] = nullptr;
-		}
-
-		// Reset reducer of batch
-		uint32_t packet_id = _packet_counter - _next_batch_items + (header == NULL ? 0 : 1);
-		uint32_t batch_modulo = _batch_counter & (_configuration.queue_size - 1);
-
-		_reducer[batch_modulo].counter = 0;
-		_reducer[batch_modulo].first_packet_counter = packet_id;
-		_reducer[batch_modulo].valid_items = _next_batch_items;
-
-		// Produce next batch in all parallel workers
-		for (uint32_t i=1; i<_configuration.num_of_cores; ++i) {
-			while(!_workers_parallel[i-1]->classify(batch_modulo, _next_batch));
-		}
-
-		// Do serial work
-		while(!_worker_serial->classify(batch_modulo, _next_batch));
-
-		// Produce the reducer
-		infof("Produced batch with %u packets starting from id %u" ,_next_batch_items, packet_id);
-
-		// Update counters
-		++_batch_counter;
-		_next_batch_items = 0;
+		process_batch();
 	}
 
 	return _packet_counter++;
+}
+
+/**
+ * @brief Process a new batch of packets.
+ */
+template <uint32_t N>
+void NuevoMatch<N>::process_batch() {
+
+	// Reset reducer of batch
+	uint32_t batch_modulo = _batch_counter & (_configuration.queue_size - 1);
+
+	// Invalidate remaining packets in batch
+	for (uint32_t i=_next_batch_items; i<N; ++i) {
+		_next_batch[i] = nullptr;
+		_reducer[batch_modulo].packet_id[i] = -1;
+	}
+		
+	_reducer[batch_modulo].counter = 0;
+	_reducer[batch_modulo].valid_items = _next_batch_items;
+	
+	// Produce next batch in all parallel workers
+	for (uint32_t i=1; i<_configuration.num_of_cores; ++i) {
+	 while(!_workers_parallel[i-1]->classify(batch_modulo, _next_batch));
+	}
+	
+	// Do serial work
+	while(!_worker_serial->classify(batch_modulo, _next_batch));
+	
+	// Produce the reducer
+	infof("Produced batch with %u packets starting from id %u" ,_next_batch_items, packet_id);
+	
+	// Update counters
+	++_batch_counter;
+	_next_batch_items = 0;
 }
 
 /**
@@ -234,7 +252,7 @@ void NuevoMatch<N>::on_new_result(WorkBatch<classifier_output_t, N> info, uint32
 				// Publish current result
 				for (auto it : _listeners) {
 					it->on_new_result(
-							reduce->first_packet_counter+i,
+							reduce->packet_id[i],
 							reduce->results[i].priority,
 							reduce->results[i].action,
 							_additional_args);
@@ -457,7 +475,7 @@ void NuevoMatch<N>::load_remainder(ObjectReader& reader) {
 	}
 
 	// In case at least on iSet is missing, the classifier should be built
-	bool rebuild_remainder = false;
+	bool rebuild_remainder = _configuration.force_rebuilding_remainder;
 	for (uint32_t i=0; i<_num_of_isets;++i) {
 		if (_isets[i] == nullptr) {
 			rebuild_remainder = true;
@@ -465,51 +483,63 @@ void NuevoMatch<N>::load_remainder(ObjectReader& reader) {
 		}
 	}
 
-	// Build remainder classifier from temporary rule-set
-	if (rebuild_remainder) {
-		loggerf("Building temporary remainder classifier for custom subsets (remainder holds %lu rules)", _remainder_rules.size());
-		// Building new classifier might thrash cash.
-		// Therefore, the building is done using a temporary object
-		// TODO - enable additional remainder options
-		CutSplit gc = CutSplit(24, 8);
-		gc.build(_remainder_rules);
-		// Pack classifier into reader
-		sub_reader = ObjectReader(gc.pack());
-	}
-	// Load the sub-reader from reader
-	else {
-		try {
-			reader >> sub_reader;
-		} catch (const exception& e) {
-			throw error("Error while extracting remainder classifier: " << e.what());
-		}
-	}
+        // Build remainder classifier from temporary rule-set
+        if (rebuild_remainder) {
+                sub_reader = build_remainder();
+        }
+        // Load the sub-reader from reader
+        else {
+                try {
+                        reader >> sub_reader;
+                } catch (const exception& e) {
+                        throw error("Error while extracting remainder classifier: " << e.what());
+                }
+        }
 
-	// Load classifier from sub-reader
-	try {
-		_configuration.remainder_classifier->load(sub_reader);
-		return;
-	} catch (const exception& e) {
-		warning("Error while loading remainder classifier: " << e.what());
-	}
+        // Load classifier from sub-reader
+        try {
+                _configuration.remainder_classifier->load(sub_reader);
+                return;
+        } catch (const exception& e) {
+                warning("Error while loading remainder classifier: " << e.what());
+        }
 
-	// Try to recover
-	loggerf("Recovering by rebuilding remainder classifier");
-	// Building new classifier might thrash cash.
-	// Therefore, the building is done using a temporary object
-	// TODO - enable additional remainder options
-	CutSplit gc = CutSplit(24, 8);
-	gc.build(_remainder_rules);
-	// Pack classifier into reader
-	sub_reader = ObjectReader(gc.pack());
-	try {
-		_configuration.remainder_classifier->load(sub_reader);
-		return;
-	} catch (const exception& e) {
-		throw error("Cannot recover. Error while rebuilding remainder classifier: " << e.what());
-	}
-
+        // Try to recover
+        loggerf("Recovering by rebuilding remainder classifier");
+        sub_reader = build_remainder();
+        try {   
+                _configuration.remainder_classifier->load(sub_reader);
+                return;
+        } catch (const exception& e) {
+                error("Error while loading remainder classifier: " << e.what());
+        }
 }
+
+
+/**
+ * @brief Manually build remainder classifier
+ */
+template <uint32_t N>
+ObjectReader NuevoMatch<N>::build_remainder() {
+        loggerf("Manually building remainder classifier (remainder holds %lu rules)", _remainder_rules.size());
+        // Building new classifier might thrash cash.
+        // Therefore, the building is done using a temporary object
+        GenericClassifier* gc;
+        if (_configuration.remainder_type == "cutsplit") {
+                gc = new CutSplit(24, 8);
+        } else if (_configuration.remainder_type == "tuplemerge") {
+                gc = new TupleMerge();
+        } else {
+                throw errorf("NuevoMatch cannot rebuild a remainder classifier of type %s", _configuration.remainder_type);
+        }
+
+        gc->build(_remainder_rules);
+        // Pack classifier into reader
+        ObjectReader output = ObjectReader(gc->pack());
+        delete gc;
+        return output;
+}
+
 
 /**
  * @brief Group the subsets based on their size (load-balance), and assign them to cores
@@ -540,15 +570,62 @@ void NuevoMatch<N>::group_subsets_to_cores() {
 	// Sort subsets based on the number of rules they hold (high to low)
 	std::sort(subsets.begin(), subsets.end(),
 			[](const NuevoMatchSubset<N>* a, const NuevoMatchSubset<N>* b) {
-				return a->size() < b->size();
+				return a->get_size() > b->get_size();
 			});
 
 	// Load balance between all classifiers and workers
 	std::list<NuevoMatchSubset<N>*> classifier_list[_configuration.num_of_cores];
-	uint32_t current = 0;
-	for (auto it : subsets) {
-		classifier_list[current].push_back(it);
-		current = (current+1) % _configuration.num_of_cores;
+
+	// Is an arbitrary core allocation was set in the configuration?
+	if (_configuration.arbitrary_subset_clore_allocation != "") {
+
+		// Make sure the remainder classifier is first
+		std::sort(subsets.begin(), subsets.end(),
+			[](const NuevoMatchSubset<N>* a, const NuevoMatchSubset<N>* b) {
+				return (a->get_type() != NuevoMatchSubset<N>::dynamic_type_t::ISET);
+			});
+
+		bool state_core = true;
+		uint32_t current = 0;
+		for (auto it : _configuration.arbitrary_subset_clore_allocation) {
+			if (state_core && it == '=') state_core = false;
+			else if (!state_core && it == ';') state_core = true;
+			else if (!state_core && it == ',') continue;
+			else if ((it < '0') || (it > '9')) throw errorf("Cannot parse char %c when allocating subsets to cores", it);
+			else if (state_core) {
+				current = it - '0';
+				current = current >= _configuration.num_of_cores ? _configuration.num_of_cores - 1 : current;
+			}
+			else if (!state_core) {
+				uint32_t idx = it - '0';
+				if (idx >= subsets.size()) continue;
+				classifier_list[current].push_back(subsets[idx]);
+			}
+
+		}
+
+	}
+	// There is not an arbitrary allocation, allocate based on size
+	else {
+		// Store the size in bytes used in each core
+		uint32_t core_size[_configuration.num_of_cores];
+		for (uint32_t i=0; i<_configuration.num_of_cores; ++i) {
+			core_size[i] = 0;
+		}
+
+		for (auto it : subsets) {
+			uint32_t current = 0, size_min=core_size[0];
+			// Choose the core with minimum size
+			for (uint32_t i=0; i<_configuration.num_of_cores; ++i) {
+				if (core_size[i] < size_min) {
+					current = i;
+					size_min = core_size[i];
+				}
+			}
+			// Add the current subset to the core
+			classifier_list[current].push_back(it);
+			core_size[current] += it->get_size();
+		}
 	}
 
 	// Hold information of available CPUs
@@ -584,10 +661,10 @@ void NuevoMatch<N>::group_subsets_to_cores() {
 	// Print status of all workers
 	for (uint32_t i=0; i<_configuration.num_of_cores; ++i) {
 
-		// Calculate number of rules for the current worker
+		// Calculate KB for the current worker
 		uint32_t size = 0;
 		for (auto it : classifier_list[i]) {
-			size += it->size();
+			size += it->get_size();
 		}
 
 		string_operations::convertor_to_string<NuevoMatchSubset<N>*> classifier_to_string =
@@ -595,7 +672,7 @@ void NuevoMatch<N>::group_subsets_to_cores() {
 		string subset_string = string_operations::join(classifier_list[i], " ", classifier_to_string);
 
 		// Print status of serial worker
-		logger("NuevoMatch worker 0 on CPU " << cpu_vec[i] << " holds: {" << subset_string << "} with " << size << " rules.");
+		logger("NuevoMatch worker 0 on CPU " << cpu_vec[i] << " holds: {" << subset_string << "} of total " << size << " KB.");
 	}
 
 }

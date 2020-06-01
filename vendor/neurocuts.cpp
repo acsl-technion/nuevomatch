@@ -26,6 +26,7 @@
 #include <queue>
 #include <sstream>
 #include <iostream>
+#include <queue>
 
 #include <object_io.h>
 #include <neurocuts.h>
@@ -78,6 +79,8 @@ void NeuroCuts::load(ObjectReader& reader) {
 		reader >> _nodes[i].id;
 		reader >> _nodes[i].depth;
 
+		_nodes[i].max_priority = -2;
+
 		uint32_t item;
 		reader >>  item;
 		_nodes[i].is_partition = (item == 0) ? true : false;
@@ -102,6 +105,7 @@ void NeuroCuts::load(ObjectReader& reader) {
 			reader >> index;
 			assert(index < num_of_nodes);
 			_nodes[i].children[j] = &_nodes[index];
+			_nodes[index].parent = &_nodes[i];
 		}
 
 		// Update max binth
@@ -113,6 +117,22 @@ void NeuroCuts::load(ObjectReader& reader) {
 
 	// Set root node
 	_root = &_nodes[0];
+	_root->parent = nullptr;
+
+	// Calculate max priority
+	for (uint32_t i=0; i<num_of_nodes; ++i) {
+		node* current = &_nodes[i];
+		// Find max priority from the rules of this
+		int max_priority = 0;
+		for (uint32_t r=0; r<current->num_of_rules; ++r) {
+			max_priority = std::max(max_priority, (int)current->rules[r]->priority);
+		}
+		current->max_priority = max_priority;
+		// Update parents
+		for (; current != nullptr; current=current->parent) {
+			current->max_priority = std::max(current->max_priority, max_priority);
+		}
+	}
 
 	// Calculate size
 	for (uint32_t i=0; i<num_of_nodes; ++i) {
@@ -160,23 +180,25 @@ void NeuroCuts::stop_performance_measurement() {
  * @param header The input packet header
  * @returns A pointer to a matching rule
  */
-matching_rule* NeuroCuts::match(node* current, const uint32_t* header) {
+matching_rule* NeuroCuts::match(node* current, const uint32_t* header, int priority) {
 	// In case the node is partition
 	if (current->is_partition) {
 		matching_rule* matches[current->num_of_children];
 
 		// All children of this must be checked
 		for(uint32_t i=0; i< current->num_of_children; ++i) {
-			matches[i] = match(current->children[i], header);
+			matches[i] = match(current->children[i], header, priority);
 		}
 
 		// Return the highest priority rule
 		matching_rule* output = nullptr;
 		for(uint32_t i=0; i< current->num_of_children; ++i) {
-			if (output == nullptr) {
-				output = matches[i];
-			} else if ( (matches[i]) && (output->priority > matches[i]->priority) ) {
-				output = matches[i];
+			if ( (matches[i]) && ((priority<0) || (priority > matches[i]->priority)) ) {
+				if (output == nullptr) {
+					output = matches[i];
+				} else if (output->priority > matches[i]->priority) {
+					output = matches[i];
+				}
 			}
 		}
 		return output;
@@ -196,7 +218,7 @@ matching_rule* NeuroCuts::match(node* current, const uint32_t* header) {
 			}
 			// In case the current child matches the packet
 			if (child_match) {
-				return match(child, header);
+				return match(child, header, priority);
 			}
 		}
 		// No child matches the packet
@@ -214,7 +236,7 @@ matching_rule* NeuroCuts::match(node* current, const uint32_t* header) {
 				}
 			}
 			// The current rule matches the packet
-			if (rule_match) {
+			if ( (rule_match) && ((priority<0) || (priority > rule->priority)) ) {
 				return rule;
 			}
 		}
@@ -228,9 +250,9 @@ matching_rule* NeuroCuts::match(node* current, const uint32_t* header) {
  * @param header An array of 32bit integers according to the number of supported fields.
  * @returns The matching rule action/priority (or 0xffffffff if not found)
  */
-uint32_t NeuroCuts::classify_sync(const uint32_t* header) {
-	matching_rule* rule = match(_root, header);
-	return (rule == nullptr) ? 0xFFFFFFFF : rule->priority;
+uint32_t NeuroCuts::classify_sync(const uint32_t* header, int priority) {
+	matching_rule* rule = match(_root, header, priority);
+	return (rule == nullptr) ? priority : rule->priority;
 }
 
 /**
@@ -238,27 +260,25 @@ uint32_t NeuroCuts::classify_sync(const uint32_t* header) {
  * @param header An array of 32bit integers according to the number of supported fields.
  * @returns A unique id for the packet
  */
-uint32_t NeuroCuts::classify_async(const uint32_t* header) {
+uint32_t NeuroCuts::classify_async(const uint32_t* header, int priority) {
 	uint32_t packet_id = 0xffffffff;
-	int priority = -1, action = -1;
 	matching_rule* rule = nullptr;
 
 	// Perform lookup
 	// Skip invalid packets
 	if (header) {
-		rule = match(_root, header);
+		rule = match(_root, header, priority);
 		packet_id = _packet_counter++;
 	}
 
 	// In case the rule was found
 	if (rule != nullptr) {
-		// TODO priority equals action
-		priority = action = rule->priority;
+		priority = rule->priority;
 	}
 
 	// Broadcast result
 	for (auto it : _listeners) {
-		it->on_new_result(packet_id, priority, action, _additional_args);
+		it->on_new_result(packet_id, priority, priority, _additional_args);
 	}
 
 	return packet_id;

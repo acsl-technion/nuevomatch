@@ -104,6 +104,6 @@ void cpu_core_tools_set_thread_affinity(pthread_t thread, int cpu_index) {
  * @param core_idx The current core index
  */
 int cpu_core_tools_get_next_physical_core(int core_idx) {
-	// TODO!
-	return (core_idx+2) % cpu_core_tools_get_core_count();
+	// Important: make sure the hyperthreading is disabled!
+	return (core_idx+1) % cpu_core_tools_get_core_count();
 }

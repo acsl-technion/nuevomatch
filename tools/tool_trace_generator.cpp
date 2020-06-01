@@ -1,4 +1,4 @@
-	/*
+/*
  * MIT License
  * Copyright (c) 2019 Alon Rashelbach
  *
@@ -24,6 +24,7 @@
 #include <list>
 #include <vector>
 #include <set>
+#include <map>
 #include <iostream>
 #include <algorithm> // Set intersection
 
@@ -37,21 +38,16 @@
 
 using namespace std;
 
-trace_packet gen_packet_in_rule(const list<openflow_rule>& rule_db, uint32_t rule_idx, uint32_t tries);
-vector<trace_packet> generate_unique_packets(const list<openflow_rule>& rule_db, uint32_t num, set<uint32_t>& malformed_packets);
-vector<trace_packet> generate_random_packets(const list<openflow_rule>& rule_db, uint32_t num, set<uint32_t>& malformed_packets);
-
-// Holds arguments information
+// Holds arguments informatio
 static argument_t my_arguments[] = {
 		// Name,			Required,	IsBoolean,	Default,	Help
 		{"-f",				1,			0,			NULL,		"Filter filename. Supported formats: [Classbench, Classbnech-ng, Binary]"},
 		{"--indices",		0,			0,			NULL,		"Load an indices file to apply a filter on the ruleset"},
 		{"--reverse",		0,			1,			NULL,		"Reverse the effect of the indices file"},
-		{"-n",				1,			0,			"0",		"Number of packets to generate"},
 		{"-p",				0,			1,			NULL,		"Prints rule-set to stdout"},
 		{"-o",				0,			0,			NULL,		"Output trace filename"},
 		{"-s",				0,			1,			NULL,		"Shuffle trace"},
-		{"-r",				0,			1,			NULL,		"Randomize trace"},
+		{"-n",				0,			0,			"0",		"Number of packets to generate (used only when no locality file is specified)."},
 		{NULL,				0,			0,			NULL,		"Reads a ruleset file / NuevoMatch classifier and generates accurate packet trace file"} /* Sentinel */
 };
 
@@ -161,9 +157,37 @@ public:
 	}
 };
 
+
+typedef vector<trace_packet> header_options;
+typedef map<int, header_options> rule_mapping_t;
+
+rule_mapping_t generate_mapping( const list<openflow_rule>& rule_db);
+vector<int> generate_uniform_locality(size_t num_of_packets, size_t num_of_rules);
+void generate_trace(rule_mapping_t mapping, vector<int>& trace_indices, FILE* file);
+trace_packet gen_packet_in_rule(const list<openflow_rule>& rule_db, int rule_idx, int tries);
+vector<int> load_custom_locality(const char* filename);
+
+// How many different trace options to generate for each
+// rule in the ruleset?
+#define OPTIONS 1
+
 // Holds the rule-set attributes
 static uint32_t field_num;
 static ruleset_type_t ruleset_type;
+
+/**
+ * @brief Prints progres to the screen
+ */
+void print_progress(int counter, const char* message, size_t size) {
+	if ( (size ==0) || (counter < 0) ) {
+		fprintf(stderr, "\r%s... Done   \n", message);
+	} else {
+		int checkpoint = size < 100 ? 1 : size/100;
+		if (counter%checkpoint==0) {
+			fprintf(stderr, "\r%s... (%u%%)", message, counter/checkpoint);
+		}
+	}
+}
 
 /**
  * @brief Application entry point
@@ -199,7 +223,7 @@ int main(int argc, char** argv) {
 	if (indices_filename != NULL) {
 		ObjectReader reader(indices_filename);
 		bool reverse = ARG("--reverse")->available;
-		std::set<uint32_t> indices = load_indices_database(reader);
+		std::set<uint32_t> indices = read_indices_file(reader);
 		messagef("Rule set had %lu rules before truncating by indices", rule_db.size());
 		messagef("Found %u indices in file. Applying on ruleset...", indices.size());
 		rule_db = apply_indices_on_ruleset(rule_db, indices, reverse);
@@ -227,329 +251,215 @@ int main(int argc, char** argv) {
 		throw error("cannot open output filename for writing");
 	}
 
-	// Allocate memory
-	uint32_t packets_num = atoi( ARG("-n")->value );
-	set<uint32_t> malformed_packets;
-	vector<trace_packet> packets;
+	// Generate a unique mapping between the rules and packet header
+ 	auto mapping = generate_mapping(rule_db);
 
-	// Generate rules
-	if (ARG("-r")->available) {
-		fprintf(stderr, "Generating random packets...\n");
-		packets = generate_random_packets(rule_db, packets_num, malformed_packets);
-	} else {
-		fprintf(stderr, "Generating unique packets...\n");
-		packets = generate_unique_packets(rule_db, packets_num, malformed_packets);
-		// Generate additional packets to fill gaps in malformed packets
-		fprintf(stderr, "Creating additional %lu random packets\n", malformed_packets.size());
-		vector<trace_packet> additional_packets = generate_random_packets(rule_db, malformed_packets.size(), malformed_packets);
-		std::move(additional_packets.begin(), additional_packets.end(), std::back_inserter(packets));
+ 	// Randomize trace indices
+ 	uint32_t num_of_packets = atoi( ARG("-n")->value );	
+ 	vector<int> trace_indices = generate_uniform_locality(num_of_packets, rule_db.size());
+
+	// Shuffle trace indices, if necessary
+	if (ARG("-s")->available) {
+		messagef("Shuffeling trace...");
+		uint32_t* perm = new uint32_t[trace_indices.size()];
+		random_permutation(perm, trace_indices.size());
+		vector<int> trace_indices_new(trace_indices.size());
+		for (size_t i=0; i<trace_indices.size(); ++i) {
+			trace_indices_new[i] = trace_indices[perm[i]];
+		}
+		trace_indices = trace_indices_new;
+		delete[] perm;
 	}
 
-	// Initiate checkpoint value
-	uint32_t checkpoint = packets.size() < 100 ? 1 : packets.size()/100;
+	generate_trace(mapping, trace_indices, out_file_ptr);
 
-	// Shuffle packets
-	bool shuffle = ARG("-s")->available;
-	uint32_t* perm = new uint32_t[packets.size()];
-	random_permutation(perm, packets.size());
-
-	// Print packets
-	for (uint32_t i=0; i<packets.size(); ++i) {
-
-		uint32_t packet_idx = shuffle ? perm[i] : i;
-		if (malformed_packets.find(packet_idx) != malformed_packets.end()) {
-			continue;
-		}
-
-		// Update status
-		if (i%checkpoint==0) {
-			fprintf(stderr, "\rPrinting rules (%u%%)...", i/checkpoint);
-		}
-
-		// Print packet fields
-		for (uint32_t j=0; j<field_num; ++j) {
-			fprintf(out_file_ptr, "%u\t", packets[packet_idx].header[j]);
-		}
-
-		// Print rule number
-		fprintf(out_file_ptr, "%u\n", packets[packet_idx].match_priority);
-	}
-
-	delete perm;
-	fprintf(stderr, "\nDone\n");
 	return 0;
 }
 
+
 /**
- * @brief Generate at least a single packet per rule
- * @param rule_db The rule database
- * @param packet_num The number of packets
- * @param A set of invalid packet indices
- * return A list of packets
+ * @brief Generates a mapping between a rule index to a
+ * random header packet that matches the rule.
+ * @param rule_db The ruleset
+ * @param A set of unreachable rule indices
+ * @returns A mapping rule_idx->(priority, header)
  */
-vector<trace_packet> generate_unique_packets(const list<openflow_rule>& rule_db, uint32_t packets_num, set<uint32_t>& malformed_packets) {
+rule_mapping_t generate_mapping(const list<openflow_rule>& rule_db) {
+	rule_mapping_t output;
 
 	// Count how many non-unique rules are there
-	set<uint32_t> non_unique;
+	set<int> non_unique;
 
-	// The output packets
-	vector<trace_packet> output;
-	output.resize(packets_num);
-	for (uint32_t i=0; i<packets_num; ++i) {
-		output[i].header.resize(field_num);
+	auto rule = rule_db.begin();
+	for (size_t i=0; i<rule_db.size(); ++i) {
+		output[i] = vector<trace_packet>();
+		for (int j=0; j<OPTIONS; ++j) {
+			output[i].push_back(trace_packet());
+			output[i].back().header.resize(field_num);
+		}	
+		++rule;
 	}
 
-	// Regular upper bounds for 5-tuple classifier
-	uint32_t checkpoint, counter;
-
-	// For each dimension...
+	// For each field
 	for (uint32_t f=0; f<field_num; ++f) {
-
-		// Initiate checkpoint value
-		checkpoint = rule_db.size() < 100 ? 1 : rule_db.size()/100;
-		counter = 0;
-
-		// Build the IntervalList
+		// Build an interval-list for the current field
 		IntervalList interval(0, get_field_bound(f, ruleset_type));
-		vector<IntervalList> rule_intervals;
-		vector<uint32_t> priorities;
-
-		for(auto rule : rule_db) {
-			// Update status
-			if (counter%checkpoint==0) {
-				fprintf(stderr, "\rBuilding IntervalList for field %u... (%u%%)...", f, counter/checkpoint);
-			}
-			rule_intervals.push_back( interval.apply_rule(rule.fields[f].low, rule.fields[f].high) );
-			priorities.push_back(rule.priority);
-			++counter;
-		}
-		fprintf(stderr, "\rBuilding IntervalList for field %u - done           \n", f);
-
-		// Initiate checkpoint value
-		checkpoint = packets_num < 100 ? 1 : packets_num/100;
+		auto rule = rule_db.begin();
 
 		// Count how many non-unique rules are there in the current field
-		set<uint32_t> current_non_unique;
+		set<int> current_non_unique;
 
-		// Rule iterator
-		auto rule_it = rule_db.begin();
+		char message[256];
+		snprintf(message, 256, "Calculating interval-list for field %d", f);
 
-		// Build packets
-		for (uint32_t i=0; i<packets_num; ++i) {
-			// Update status
-			if (i%checkpoint==0) {
-				fprintf(stderr, "\rGenerating packets for field %u... (%u%%)...", f, i/checkpoint);
+		for (size_t i=0; i<rule_db.size(); ++i) {
+			// Print progress to screen
+			print_progress(i, message, rule_db.size());
+			// Calculate the interval for the current rule
+			auto sub_interval = interval.apply_rule(rule->fields[f].low, rule->fields[f].high);
+			// In case we can guarantee unique value for the current rule
+			if (sub_interval.size() > 0) {
+				// Fill values for the current field
+				for (int j=0; j<OPTIONS; ++j) {
+					output[i][j].header[f] = sub_interval.random_value();
+				}
 			}
-
-			uint32_t rule_idx = i % rule_db.size();
-
-			// In case the current rule is non_unique
-			if (rule_intervals[rule_idx].size() == 0) {
-				current_non_unique.insert(rule_idx);
-
-				// Randomize the value of the current packet
-				uint32_t low = rule_it->fields[f].low;
-				uint32_t high = rule_it->fields[f].high;
-				output[i].header[f] = gen_uniform_random_uint32(low, high);
-				// Match index is not known yet
-			}
-			// Otherwise, randomize packet value in field
+			// We cannot guarantee a unique mapping
 			else {
-				output[i].header[f] = rule_intervals[rule_idx].random_value();
-				output[i].match_priority = priorities[rule_idx];
+				uint32_t low = rule->fields[f].low;
+				uint32_t high = rule->fields[f].high;
+				current_non_unique.insert(i);
+				for (int j=0; j<OPTIONS; ++j) {
+					output[i][j].header[f] = gen_uniform_random_uint32(low, high);
+				}
 			}
-
-			// Update iterator
-			if (++rule_it == rule_db.end()) {
-				rule_it = rule_db.begin();
+			// Update match priority
+			for (int j=0; j<OPTIONS; ++j) {
+				output[i][j].match_priority = rule->priority;
 			}
+			++rule;
 		}
 
 		// Update the non_unique rule set
 		if (f == 0) {
 			non_unique = current_non_unique;
 		} else {
-			set<uint32_t> intersect;
+			set<int> intersect;
 			set_intersection(
 					non_unique.begin(), non_unique.end(),
 					current_non_unique.begin(), current_non_unique.end(),
-					std::inserter(intersect,intersect.begin()));
+					std::inserter(intersect, intersect.begin()));
 			non_unique = intersect;
 		}
-
-		fprintf(stderr, "\rGenerating packets for field %u - done.      \n", f);
+		
+		// Print progress to screen
+		print_progress(-1, message, 1);
 	}
 
-	fprintf(stderr, "Non-unique rules: %u\n", (uint32_t)non_unique.size());
+	// Update mapping for non-unique rules
+	fprintf(stderr, "Non-unique rules: %lu\n", non_unique.size());
 
-	// Count how many non-reachable rules are there
-	set<uint32_t> unreachable_rules;
-
-	// Initiate checkpoint value
-	checkpoint = non_unique.size() < 100 ? 1 : non_unique.size()/100;
-	counter=0;
+	set<int> unreachable_rules;
 
 	// Handle non-unique rules...
+	int counter = 0;
 	for (auto idx : non_unique) {
-
-		// Update status
-		if (counter%checkpoint==0) {
-			fprintf(stderr, "\rHandling non-unique rules (%u%%)...", counter/checkpoint);
-		}
-		++counter;
-
+		print_progress(counter++, "Handling non-unique rules", non_unique.size());
 		// Skip unreachable rules
 		if (unreachable_rules.find(idx) != unreachable_rules.end()) {
 			continue;
 		}
-
-		// For each packet of this rule..
-		for (uint32_t i=idx; i<packets_num; i+= rule_db.size()) {
-			trace_packet packet = gen_packet_in_rule(rule_db, idx, 5);
-			output[i] = packet;
-			if (packet.match_priority == 0xffffffff) {
-				malformed_packets.insert(i);
-				unreachable_rules.insert(idx);
-			} else {
-				// The current rule is reachable
-				unreachable_rules.erase(idx);
-			}
+		// Try to generate a header that matches the rule. No more than 5 times.
+		uint32_t desired_priority = output[idx][0].match_priority;
+		trace_packet packet = gen_packet_in_rule(rule_db, idx, 5);
+		// We don't care for duplicates in this case
+		for (int j=0; j<OPTIONS; ++j) {
+			output[idx][j] = packet;
+		}
+		if (packet.match_priority != desired_priority) {
+			unreachable_rules.insert(idx);
+		} else {
+			// The current rule is reachable
+			unreachable_rules.erase(idx);
 		}
 	}
-
-	fprintf(stderr, "\rHandling non-unique rules - done. Unreachable rules: %u. Malformed packets: %u \n",
-			(uint32_t)unreachable_rules.size(), (uint32_t)malformed_packets.size());
-
+	print_progress(0, "Handling non-unique rules", 0);
+	fprintf(stderr, "Unreachable rules: %lu\n", unreachable_rules.size());
 	return output;
 }
 
+/**
+ * @brief Generates a locality vector
+ * @param num_of_packets Number of packets in trace
+ * @param num_of_rules Number of rules in the ruleset
+ */
+vector<int> generate_uniform_locality(size_t num_of_packets, size_t num_of_rules) {
+	vector<int> output(num_of_packets);
+	messagef("Generating uniform locality...");
+	for (size_t i=0; i<num_of_packets; ++i) {
+		output[i] = gen_uniform_random_uint32(0, num_of_rules-1);
+	}
+	return output;
+}
 
 /**
- * @brief Generate at least a single packet per rule
- * @param rule_db The rule database
- * @param packet_num The number of packets
- * @param malformed_packets A set of invalid packet indices
+ * @brief Generate trace from mapping and indices. Prints to output file
+ * @param mapping A mapping from rule-index to packet header
+ * @param trace_indices The indices of the packets in trace
+ * @param file The output file
  */
-vector<trace_packet> generate_random_packets(const list<openflow_rule>& rule_db, uint32_t packets_num, set<uint32_t>& malformed_packets) {
+void generate_trace(rule_mapping_t mapping, vector<int>& trace_indices, FILE* file) {
+	for (size_t i=0; i<trace_indices.size(); ++i) {
+		// Print progress
+		print_progress(i, "Generating trace", trace_indices.size());
 
-	// Store pointers to rules
-	vector<const openflow_rule*> rule_ptr_list;
+		// Which rule are we writing?
+		int rule_idx = trace_indices[i] % mapping.size();
 
-	// The output packets
-	vector<trace_packet> output;
-	output.resize(packets_num);
+		// Select a packet from the rule options
+		vector<trace_packet>& packet_options = mapping[rule_idx];
+		int option_idx = gen_uniform_random_uint32(0, packet_options.size()-1);
+		trace_packet& packet = packet_options[option_idx];
 
-	// Randomize packets
-	infof("Randomizing %u packets...", packets_num);
-	for (uint32_t i=0; i<packets_num; ++i) {
-		// Choose rule by random
-		uint32_t rule_idx = gen_uniform_random_uint32(0, rule_db.size()-1);
-
-		// Get the rule
-		auto rule_it = rule_db.begin();
-		for (uint32_t i=0; i<rule_idx; ++i) {
-			++rule_it;
-		}
-		const openflow_rule& rule = *rule_it;
-		rule_ptr_list.push_back(&rule);
-
-		// Choose field values by random
-		output[i].header.resize(field_num);
+		// Print packet fields
 		for (uint32_t j=0; j<field_num; ++j) {
-			uint32_t field_start = rule_it->fields[j].low;
-			uint32_t field_end = rule_it->fields[j].high;
-			// Check for errors
-			if (field_start > field_end) {
-				throw errorf("field start (%u) > field end (%u) for rule %u",
-						field_start, field_end, rule_idx);
-			}
-			output[i].header[j] = gen_uniform_random_uint32(field_start, field_end);
-			output[i].match_priority = rule_it->priority; // Temporary match index, will be verified later
+			fprintf(file, "%u\t", packet.header[j]);
 		}
+
+		// Print rule number
+		fprintf(file, "%u\n", packet.match_priority);
 	}
-
-	fprintf(stderr, "Done. Starting to perform rule-matching...");
-
-	uint32_t checkpoint = packets_num/100;
-	if (checkpoint==0) checkpoint=1;
-
-	// Search exact rule-match for each packet
-	for (uint32_t i=0; i<packets_num; ++i) {
-		// Update status
-		if (i%checkpoint==0) {
-			fprintf(stderr, "\rPerforming rule-matching for packets (%u%%)...", i/checkpoint);
-		}
-
-		int found=0;
-
-		// Search for the first match rule
-		uint32_t rule_idx = 0;
-		for(auto rule : rule_db) {
-			int match=1;
-			// For each filed
-			for (uint32_t j=0; j<field_num; ++j) {
-				// Get rule boundaries
-				uint32_t field_start = rule.fields[j].low;
-				uint32_t field_end = rule.fields[j].high;
-				// Check collision
-				if ( (output[i].header[j] < field_start) ||
-					 (output[i].header[j] > field_end ) )
-				{
-					match=0;
-					break;
-				}
-			}
-			// In case of match
-			if (match) {
-				output[i].match_priority = rule.priority;
-				found=1;
-				break;
-			}
-			++rule_idx;
-		}
-
-		// Check for errors
-		if (found==0) {
-			// Print packet
-			cerr << endl <<
-					"Warning: Packet " << i << "[" << output[i].to_string() << "]" <<
-					"did not match any rule. Packet origin rule: [" << rule_ptr_list[i]->to_string() << "]" <<
-					"Skipping packet" << endl;
-			malformed_packets.insert(i);
-		}
-	}
-	return output;
+	print_progress(0, "Generating trace", 0);
 }
 
 /**
- * @brief Generates a packet within the required rule index
- * @return 1 On success, 0 after maximum tries
+ * @brief Generates a packet within the required rule index. Does not always succeed.
+ * @param rule_db The ruleset
+ * @param rule_idx The required rule index
+ * @param tries Number of tries
+ * @returns A trace packet
  */
-trace_packet gen_packet_in_rule(const list<openflow_rule>& rule_db, uint32_t rule_idx, uint32_t tries) {
-	uint32_t r, counter = 0;
-	uint32_t priority = 0xffffffff;
-	// Initiate an invalid
-	trace_packet packet;
-	packet.match_priority = 0xffffffff;
-	packet.header.resize(field_num);
+trace_packet gen_packet_in_rule(const list<openflow_rule>& rule_db, int rule_idx, int tries) {
 
-	// Get the rule
+	trace_packet output;
+	output.header.resize(field_num);
+
+	// Get a reference to the desired rule
 	auto rule_it = rule_db.begin();
-	for (uint32_t i=0; i<rule_idx; ++i) {
+	for (int i=0; i<rule_idx; ++i) {
 		++rule_it;
 	}
 	const openflow_rule& rule = *rule_it;
 
-	do {
-
+	while (tries > 0) {
 		// Choose field values by random
 		for (uint32_t j=0; j<field_num; ++j) {
-			packet.header[j] = gen_uniform_random_uint32(rule.fields[j].low, rule.fields[j].high);
+			output.header[j] = gen_uniform_random_uint32(rule.fields[j].low, rule.fields[j].high);
 		}
 
 		// Validate the rule is indeed the requested index
 		rule_it = rule_db.begin();
-		for (r=0; r<=rule_idx; ++r) {
+		for (int r=0; r<=rule_idx; ++r) {
 
 			int match=1;
 
@@ -559,30 +469,26 @@ trace_packet gen_packet_in_rule(const list<openflow_rule>& rule_db, uint32_t rul
 				uint32_t field_start = rule_it->fields[j].low;
 				uint32_t field_end = rule_it->fields[j].high;
 				// Check collision
-				if ( (packet.header[j] < field_start) || (packet.header[j] > field_end ) ) {
+				if ( (output.header[j] < field_start) || (output.header[j] > field_end ) ) {
 					match=0;
 					break;
 				}
 			}
 
 			if (match){
-				priority = rule_it->priority;
+				output.match_priority = rule_it->priority;
 				break;
 			}
 			++rule_it;
 		}
 
-		// Returns an invalid apcket
-		if (++counter == tries) {
-			return packet;
+		// Can break - found a desired header!
+		if ((int)output.match_priority == rule_idx) {
+			break;
 		}
 
-		// Break only if the matching rule is with the desired index
-	} while (r != rule_idx);
-
-	// Found match!
-	// Set the packet index
-	packet.match_priority = priority;
-	return packet;
+		--tries;
+	}
+	return output;
 }
 

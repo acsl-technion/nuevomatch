@@ -23,82 +23,87 @@
 
 #pragma once
 
-#include <time.h>
+#include <vector>
+#include <queue>
+#include <list>
+#include <map>
+#include <algorithm>
 
 #include <generic_classifier.h>
+#include <object_io.h>
 #include <rule_db.h>
 
+
+struct node {
+	int depth;
+	int problematic;
+	int node_has_rule;
+	int row;
+	int column;
+	int index;
+	bool is_compressed;
+	int count;
+
+	matching_rule boundary;
+
+	std::list <matching_rule*> classifier;
+	std::list <node *> children;
+	std::list <node *> actual_children;
+	std::vector<int> cuts;
+
+	node() : depth(0), problematic(0), node_has_rule(0),
+		  row(0), column(0), index(0), is_compressed(0), count(0)
+	{
+	  cuts.resize(CLASSIFIER_FIELDS);
+	  for (int i = 0; i < CLASSIFIER_FIELDS; i++) {
+		  cuts[i] = 0;
+	  }
+	}
+};
+
+struct TreeDetails {
+	node* root;
+	std::vector<bool> wideFields;
+	TreeDetails() : root(nullptr) {
+		wideFields.resize(CLASSIFIER_FIELDS);
+	}
+};
+
 /**
- * @brief A NeuroCuts classifier implementation in C++
+ * @brief A CutSplit object matching the vector interface
  */
-class NeuroCuts : public GenericClassifier {
+class EffiCuts : public GenericClassifier {
 private:
 
-	struct node {
-		bool is_partition;
-		uint32_t id;
-		uint32_t depth;
-		uint32_t num_of_children;
-		uint32_t num_of_rules;
-		node** children;
-		matching_rule** rules;
-		range boundaries[FIVE_TUPLE_FIELDS];
-	};
-
 	uint32_t _num_of_rules;
+	uint32_t _binth;
 	uint32_t _size;
 	uint32_t _build_time;
-	uint32_t _max_binth;
 
-	node* _nodes;
-	matching_rule* _rules;
-	node* _root;
-
-	// Clones should not delete nodes and rules
-	bool _is_clone;
+	matching_rule* rule_db;
 
 	// Performance
 	struct timespec perf_start_time, perf_end_time;
 
-	/**
-	 * @brief Helper recursive method for finding matching node
-	 * @param current The node to check
-	 * @param header The input packet header
-	 * @returns A pointer to a matching rule
-	 */
-	matching_rule* match(node* current, const uint32_t* header);
-
-	/**
-	 * @brief Used for debugging. Prints a NeuroCuts node
-	 */
-	void print_node(node* n);
-
-	/**
-	 * @brief Computes the memory access of this
-	 * @param n The node from which start calculating. At normal cases, should be root.
-	 */
-	uint32_t compute_mem_access(node* n) const;
+	// Trees
+	std::list<TreeDetails> _trees;
 
 public:
 
-	NeuroCuts();
-	~NeuroCuts();
+	EffiCuts(uint32_t binth);
+	~EffiCuts();
 
 	/**
 	 * @brief Build the classifier data structure
 	 * @returns 1 On success, 0 on fail
 	 */
-	int build(const std::list<openflow_rule>& rule_db) {
-		throw std::runtime_error("NeuroCuts build should be done using NeuroCuts library");
-	}
+	int build(const std::list<openflow_rule>& rule_db);
 
 	/**
 	 * @brief Packs this to byte array
 	 * @returns An object-packer with the binary data
 	 */
-	ObjectPacker pack() const {
-		throw std::runtime_error("NeuroCuts pack should be done using Python library");
-	}
+	ObjectPacker pack() const;
 
 	/**
 	 * @brief Creates this from a memory location
@@ -122,11 +127,6 @@ public:
 	uint32_t get_build_time() const { return _build_time; }
 
 	/**
-	 * @brief Returns the maximum supported number of fields this can classify
-	 */
-	virtual const unsigned int get_supported_number_of_fields() const { return FIVE_TUPLE_FIELDS; }
-
-	/**
 	 * @brief Starts the performance measurement of this
 	 */
 	void start_performance_measurement();
@@ -140,9 +140,7 @@ public:
 	 * @brief clones this to another instance
 	 */
 	virtual GenericClassifier* clone() {
-		NeuroCuts* clone = new NeuroCuts(*this);
-		clone->_is_clone = true;
-		return clone;
+		return new EffiCuts(*this);
 	}
 
 	/**
@@ -150,14 +148,14 @@ public:
 	 * @param header An array of 32bit integers according to the number of supported fields.
 	 * @returns A unique id for the packet
 	 */
-	uint32_t classify_async(const uint32_t* header);
+	uint32_t classify_async(const uint32_t* header, int priority);
 
 	/**
 	 * @brief Start a synchronous process of classification an input packet.
 	 * @param header An array of 32bit integers according to the number of supported fields.
 	 * @returns The matching rule action/priority (or 0xffffffff if not found)
 	 */
-	uint32_t classify_sync(const uint32_t* header);
+	uint32_t classify_sync(const uint32_t* header, int priority);
 
 	/**
 	 * @brief Prints statistical information
@@ -168,5 +166,10 @@ public:
 	/**
 	 * @brief Returns a string representation of this
 	 */
-	virtual const std::string to_string() const { return "NueroCuts"; }
+	virtual const std::string to_string() const { return "EffiCuts"; }
+
+	/**
+	 * @brief Returns the maximum supported number of fields this can classify
+	 */
+	virtual const unsigned int get_supported_number_of_fields() const { return FIVE_TUPLE_FIELDS; }
 };

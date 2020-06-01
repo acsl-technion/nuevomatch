@@ -1,0 +1,319 @@
+diff --git a/OVS/TupleSpaceSearch.cpp b/OVS/TupleSpaceSearch.cpp
+index 047bed7..9cffdc5 100644
+--- a/OVS/TupleSpaceSearch.cpp
++++ b/OVS/TupleSpaceSearch.cpp
+@@ -240,6 +240,20 @@ int PriorityTupleSpaceSearch::ClassifyAPacket(const Packet& packet) {
+ 	QueryUpdate(q);
+ 	return priority;
+ }
++
++int PriorityTupleSpaceSearch::ClassifyAPacket(const Packet& packet, int priority) {
++	int q = 0;
++	for (auto& tuple : priority_tuples_vector) {
++		//if (tuple->maxPriority < 0) printf("priority %d\n", tuple->maxPriority);
++		if (priority > tuple->maxPriority) break;
++		auto result = tuple->ClassifyAPacket(packet);
++		q++;
++		priority = priority > result ? priority : result;
++	}
++	QueryUpdate(q);
++	return priority;
++}
++
+ void PriorityTupleSpaceSearch::DeleteRule(size_t i) {
+ 	if (i < 0 || i >= rules.size()) {
+ 		printf("Warning index delete rule out of bound: do nothing here\n");
+diff --git a/OVS/TupleSpaceSearch.h b/OVS/TupleSpaceSearch.h
+index a6a1d40..f9abe0c 100644
+--- a/OVS/TupleSpaceSearch.h
++++ b/OVS/TupleSpaceSearch.h
+@@ -168,6 +168,7 @@ class PriorityTupleSpaceSearch : public TupleSpaceSearch {
+ 
+ public:
+ 	int ClassifyAPacket(const Packet& one_packet);
++	int ClassifyAPacket(const Packet& one_packet, int priority = -1);
+ 	void DeleteRule(size_t i);
+ 	void InsertRule(const Rule& one_rule);
+ 	int WorstAccesses() const;
+diff --git a/TupleMerge/TupleMergeOnline.cpp b/TupleMerge/TupleMergeOnline.cpp
+index b0a86ec..ac97564 100644
+--- a/TupleMerge/TupleMergeOnline.cpp
++++ b/TupleMerge/TupleMergeOnline.cpp
+@@ -9,10 +9,10 @@
+  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  * copies of the Software, and to permit persons to whom the Software is
+  * furnished to do so, subject to the following conditions:
+- * 
++ *
+  * The above copyright notice and this permission notice shall be included in all
+  * copies or substantial portions of the Software.
+- * 
++ *
+  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+@@ -21,6 +21,7 @@
+  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+  * SOFTWARE.
+  */
++#include <assert.h>
+ #include "TupleMergeOnline.h"
+ 
+ using namespace std;
+@@ -40,7 +41,7 @@ int Delta(Tuple t1, Tuple t2) {
+ 
+ void ForgeUtils::Crazify(Tuple& tuple) {
+ 	int delta = abs(tuple[FieldSA] - tuple[FieldDA]);
+-	
++
+ 	if (tuple[FieldSA] > tuple[FieldDA] + 4) {
+ 		tuple[FieldDA] = 0;
+ 		tuple[FieldDP] = 16;
+@@ -49,13 +50,13 @@ void ForgeUtils::Crazify(Tuple& tuple) {
+ 		tuple[FieldSA] = 0;
+ 		tuple[FieldSP] = 16;
+ 	}
+-	
+-	
++
++
+ 	if (tuple[FieldSA] == 32) tuple[FieldSA] -= 4;
+ 	else if (tuple[FieldSA] > 24) tuple[FieldSA] -= 3;
+ 	else if (tuple[FieldSA] > 16) tuple[FieldSA] -= 2;
+ 	else if (tuple[FieldSA] > 8) tuple[FieldSA] -= 1;
+-	
++
+ 	if (tuple[FieldDA] == 32) tuple[FieldDA] -= 4;
+ 	else if (tuple[FieldDA] > 24) tuple[FieldDA] -= 3;
+ 	else if (tuple[FieldDA] > 16) tuple[FieldDA] -= 2;
+@@ -78,7 +79,7 @@ size_t CollisionsForTuple(const std::vector<Rule>& rules, const Tuple& tuple) {
+ // TupleMergeOnline
+ // ************
+ 
+-TupleMergeOnline::TupleMergeOnline(const std::unordered_map<std::string, std::string>& args) 
++TupleMergeOnline::TupleMergeOnline(const std::unordered_map<std::string, std::string>& args)
+ 	: collideLimit(GetIntOrElse(args, "TM.Limit.Collide", 10)) {
+ }
+ 
+@@ -91,6 +92,8 @@ TupleMergeOnline::~TupleMergeOnline() {
+ void TupleMergeOnline::ConstructClassifier(const std::vector<Rule>& rules) {
+ 	for (const Rule& r : rules) {
+ 		InsertRule(r);
++		assert(assignments.find(r.priority) != assignments.end());
++		assert(priority_to_index_map.find(r.priority) != priority_to_index_map.end());
+ 	}
+ }
+ 
+@@ -107,19 +110,57 @@ int TupleMergeOnline::ClassifyAPacket(const Packet& p) {
+ 	return prior;
+ }
+ 
++int TupleMergeOnline::ClassifyAPacket(const Packet& p, int prior) {
++	int q = 0;
++	for (auto & t : tables) {
++		if (t->MaxPriority() > prior) {
++			prior = max(prior, t->ClassifyAPacket(p));
++			q++;
++		}
++	}
++	QueryUpdate(q);
++	return prior;
++}
++
++void TupleMergeOnline::DeleteRuleByPriority(int priority) {
++
++	// In case the rule is not indexed by this
++	if (priority_to_index_map.find(priority) == priority_to_index_map.end()) {
++		return;
++	}
++	assert(assignments.find(priority) != assignments.end());
++
++	// Get the index of the rule with the priority
++	size_t rule_index = priority_to_index_map[priority];
++	DeleteRule(rule_index);
++}
++
+ void TupleMergeOnline::DeleteRule(size_t index){
++
++	size_t last_index = rules.size() - 1;
+ 	Rule r = rules[index];
+-	rules[index] = rules[rules.size() - 1];
+-	rules.pop_back();
+ 
+ 	SlottedTable* tbl = assignments[r.priority];
+-	assignments.erase(r.priority);
++
++	// Update maps
++	priority_to_index_map.erase(priority_to_index_map.find(r.priority));
++	assignments.erase(assignments.find(r.priority));
++
++	// In case the index is not the last
++	if (index != last_index) {
++		rules[index] = rules[rules.size() - 1];
++		priority_to_index_map[rules[index].priority] = index;
++	}
++
++	rules.pop_back();
+ 
+ 	bool hasChanged;
+ 	tbl->Deletion(r, hasChanged);
+ 
+ 	if (tbl->IsEmpty()) {
+-		tables.erase(find(tables.begin(), tables.end(), tbl), tables.end());
++		auto it = find(tables.begin(), tables.end(), tbl);
++		assert(it != tables.end());
++		tables.erase(it);
+ 		delete tbl;
+ 	}
+ 
+@@ -128,6 +169,13 @@ void TupleMergeOnline::DeleteRule(size_t index){
+ 	}
+ }
+ 
++void TupleMergeOnline::clear() {
++	while (!priority_to_index_map.empty()) {
++		int priority = priority_to_index_map.begin()->first;
++		DeleteRuleByPriority(priority);
++	}
++}
++
+ void Relax(Tuple& tuple) {
+ 	const int deltaThreshold = 4;
+ 	int delta = tuple[FieldSA] - tuple[FieldDA];
+@@ -138,12 +186,12 @@ void Relax(Tuple& tuple) {
+ 		tuple[FieldDA] = 0;
+ 		tuple[FieldDP] = 16;
+ 	}
+-	
++
+ 	if (tuple[FieldSA] == 32) tuple[FieldSA] -= 4;
+ 	else if (tuple[FieldSA] > 24) tuple[FieldSA] -= 3;
+ 	else if (tuple[FieldSA] > 16) tuple[FieldSA] -= 2;
+ 	else if (tuple[FieldSA] > 8) tuple[FieldSA] -= 1;
+-	
++
+ 	if (tuple[FieldDA] == 32) tuple[FieldDA] -= 4;
+ 	else if (tuple[FieldDA] > 24) tuple[FieldDA] -= 3;
+ 	else if (tuple[FieldDA] > 16) tuple[FieldDA] -= 2;
+@@ -151,16 +199,20 @@ void Relax(Tuple& tuple) {
+ }
+ 
+ void TupleMergeOnline::InsertRule(const Rule& rule) {
++
++	assert(priority_to_index_map.find(rule.priority) == priority_to_index_map.end());
++	priority_to_index_map[rule.priority] = rules.size();
++
+ 	rules.push_back(rule);
+ 	Tuple tuple;
+ 	PreferedTuple(rule, tuple);
+-	
++
+ 	for (auto table : tables) {
+ 		if (table->CanInsert(tuple)) {
+ 			bool hasChanged = false;
+ 			table->Insertion(rule, hasChanged);
+ 			assignments[rule.priority] = table;
+-			
++
+ 			if (table->NumCollisions(rule) > collideLimit) {
+ 				// Split Table
+ 				vector<Rule> collisions = table->Collisions(rule);
+@@ -184,8 +236,10 @@ void TupleMergeOnline::InsertRule(const Rule& rule) {
+ 					}
+ 				}
+ 				compatTuple[bestD] = (superTuple[bestD] + compatTuple[bestD]) / 2;
+-				SlottedTable* target = FindOrMake(compatTuple);
+-				
++
++				size_t table_idx = FindOrMake(compatTuple);
++				SlottedTable* target = tables[table_idx];
++
+ 				vector<Rule> rl = table->GetRules();
+ 				for (Rule& r : rl) {
+ 					Tuple t;
+@@ -197,7 +251,7 @@ void TupleMergeOnline::InsertRule(const Rule& rule) {
+ 					}
+ 				}
+ 			}
+-			
++
+ 			if (hasChanged) {
+ 				Resort();
+ 			}
+@@ -217,13 +271,15 @@ void TupleMergeOnline::InsertRule(const Rule& rule) {
+ 	}
+ }
+ 
+-SlottedTable* TupleMergeOnline::FindOrMake(const Tuple& t) {
++size_t TupleMergeOnline::FindOrMake(const Tuple& t) {
++	size_t counter = 0;
+ 	for (auto table : tables) {
+ 		if (table->IsThatTuple(t)) {
+-			return table;
++			return counter;
+ 		}
++		++counter;
+ 	}
+ 	SlottedTable* table = new SlottedTable(t);
+ 	tables.push_back(table);
+-	return table;
++	return tables.size()-1;
+ }
+diff --git a/TupleMerge/TupleMergeOnline.h b/TupleMerge/TupleMergeOnline.h
+index a5b905e..5e63db4 100644
+--- a/TupleMerge/TupleMergeOnline.h
++++ b/TupleMerge/TupleMergeOnline.h
+@@ -9,10 +9,10 @@
+  * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+  * copies of the Software, and to permit persons to whom the Software is
+  * furnished to do so, subject to the following conditions:
+- * 
++ *
+  * The above copyright notice and this permission notice shall be included in all
+  * copies or substantial portions of the Software.
+- * 
++ *
+  * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+@@ -23,6 +23,7 @@
+  */
+ #pragma once
+ 
++#include <map>
+ #include "../Simulation.h"
+ 
+ #include "SlottedTable.h"
+@@ -35,10 +36,15 @@ class TupleMergeOnline : public PacketClassifier {
+ public:
+ 	TupleMergeOnline(const std::unordered_map<std::string, std::string>& args);
+ 	~TupleMergeOnline();
+-	
++
+ 	virtual void ConstructClassifier(const std::vector<Rule>& rules);
+ 	virtual int ClassifyAPacket(const Packet& p);
++    virtual int ClassifyAPacket(const Packet& p, int prior=-1);
+ 	virtual void DeleteRule(size_t index);
++
++	void DeleteRuleByPriority(int priority);
++	void clear();
++
+ 	virtual void InsertRule(const Rule& r);
+ 	virtual Memory MemSizeBytes() const {
+ 		int ruleSizeBytes = 19; // TODO variables sizes
+@@ -68,12 +74,13 @@ protected:
+ 	void Resort() {
+ 		sort(tables.begin(), tables.end(), [](auto& tx, auto& ty) { return tx->MaxPriority() > ty->MaxPriority(); });
+ 	}
+-	SlottedTable* FindOrMake(const TupleMergeUtils::Tuple& t);
+-	
++	size_t FindOrMake(const TupleMergeUtils::Tuple& t);
++
+ 	std::vector<SlottedTable*> tables;
+ 	std::unordered_map<int, SlottedTable*> assignments; // Priority -> Table
+ 
+ 	std::vector<Rule> rules;
++	std::unordered_map<int, size_t> priority_to_index_map;
+ 
+ 	int collideLimit;
+ };

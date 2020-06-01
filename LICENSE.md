@@ -23,23 +23,45 @@ SOFTWARE.
 
 *Credits*
 
-*include/cut_split.h:*
-*src/cut_split.cpp:*
+*vendor/cut_split.h:*
+
+*vendor/cut_split.cpp:*
+
 Original code by Wenjun Li (Peking University, email: wenjunli@pku.edu.cn)
+
 Paper: Cutsplit: A decision-tree combining cutting and splitting for scalable packet classification (INFOCOM, 2018)
+
 Modified by Alon Rashelbach
 
 
-*include/hyper_split.h:*
-*src/hyper_split.cpp:*
+*vendor/hyper_split.h:*
+
+*vendor/hyper_split.cpp:*
+
 Original code by Yaxuan Qi
+
 Paper: Packet Classification Algorithms: From Theory to Practice (INFOCOM, 2009)
+
 Modified by Wenjun Li (wenjunli@pku.edu.cn)
+
 Modified by Alon Rashelbach
 
 
-*src/efficuts.cpp*:
+*vendor/efficuts.cpp*:
+
 Original code by Balajee Vamanan, Gwendolyn Voskuilen and T. N. Vijaykumar (Purdue University)
+
 Paper: EffiCuts: Optimizing Packet Classification for Memory and Throughput (SIGCOMM, 2010)
+
 Modified by James Daly
+
 Modified by Alon Rashelbach
+
+*include/zipf.h*:
+Author: Kenneth J. Christensen
+
+University of South Florida
+
+WWW: http://www.csee.usf.edu/~christen
+
+Email: christen@csee.usf.edu

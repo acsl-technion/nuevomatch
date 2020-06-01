@@ -106,7 +106,7 @@ bool openflow_rule::operator<(const openflow_rule& rhs) const {
 /**
  * @brief Loads rules database from memory
  * @param reader An object-reader with binary data
- * @return A pointer to rule table
+ * @return A list of open-flow rules
  */
 list<openflow_rule> load_rule_database(ObjectReader& reader) {
 
@@ -155,7 +155,7 @@ list<openflow_rule> load_rule_database(ObjectReader& reader) {
  * @brief Reads a ruleset indices file and return a set with all indices available in file
  * @param reader An object-reader with binary data
  */
-std::set<uint32_t> load_indices_database(ObjectReader& reader) {
+std::set<uint32_t> read_indices_file(ObjectReader& reader) {
 	std::set<uint32_t> output;
 	uint32_t size = reader.read<uint32_t>();
 	for (uint32_t i=0; i<size; ++i) {
@@ -299,6 +299,17 @@ vector<uint32_t> parse_ip_mask_address(const string& ip_address) {
 }
 
 /**
+ * @brief Returns an IP string prefix length
+ */
+uint32_t get_ip_prefix_length(const string& ip_address) {
+	// Split string to numeric components
+	static const regex delim("\\.|\\/");
+	vector<uint32_t> parts = string_operations::split(
+			ip_address, delim, string_operations::str2int);
+	return parts[4];
+}
+
+/**
  * @brief Parses a MAC address and returns its least significant 32 bits
  * @param mac_address A string representation of a MAC address
  */
@@ -315,13 +326,38 @@ uint32_t parse_mac_address(const string& mac_address) {
  * @brief Parses protocol range (0xXXXX/0xXXXX)
  */
 vector<uint32_t> parse_hex_range(const string& str) {
-	return string_operations::split(str, "/", string_operations::hex2int);
+	auto vals = string_operations::split(str, "/", string_operations::hex2int);
+	if (vals[1] == 0xff) {
+		return {vals[0], vals[0]};
+	} else{
+		return {0, 255};
+	}
+}
+
+/**
+ * @brief Reads a textual indices file
+ * @param filename Path to Classbench file
+ * @return A list of integers
+ */
+std::list<uint32_t> read_indices_file(const char* filename) {
+	std::list<uint32_t> output;
+	try{
+		// Open file
+		fstream fs;
+		fs.open(filename, fstream::in);
+
+
+
+	} catch (exception& e) {
+		warningf("Cannot load indices file: %s", e.what());
+	}
+	return output;
 }
 
 /**
  * @brief Reads Classbench file into rule_table_t data structure
  * @param filename Path to Classbench file
- * @return Pointer to the rule-table, or NULL in case of an error
+ * @return A list of open-flow rules
  */
 std::list<openflow_rule> read_classbench_file(const char* filename) {
 
@@ -373,6 +409,14 @@ std::list<openflow_rule> read_classbench_file(const char* filename) {
 			rule.fields[4] = parse_hex_range(fields[8]);	   // protocol
 			rule.priority = output.size();
 
+			// Get the rule prefixes, for hash-based algoes such as TM
+			rule.prefixes.resize(5);
+			rule.prefixes[0] = get_ip_prefix_length(fields[0]);
+			rule.prefixes[1] = get_ip_prefix_length(fields[1]);
+			rule.prefixes[2] = (rule.fields[2].low == rule.fields[2].high) ? 32 : 16;
+			rule.prefixes[3] = (rule.fields[3].low == rule.fields[3].high) ? 32 : 16;
+			rule.prefixes[4] = (rule.fields[4].low == rule.fields[4].high) ? 32 : 24;
+
 			output.push_back(std::move(rule));
 		}
 	} catch (exception& e) {
@@ -384,7 +428,7 @@ std::list<openflow_rule> read_classbench_file(const char* filename) {
 /**
  * @brief Reads Classbench-ng file with OpenFlow rules
  * @param filename Path to Classbench-ng file
- * @return Pointer to the rule-table, or NULL in case of an error
+ * @return A list of open-flow rules
  */
 std::list<openflow_rule> read_classbench_ng_file(const char* filename) {
 	try {

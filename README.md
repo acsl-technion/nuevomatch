@@ -11,6 +11,7 @@ General prerequisites:
 * GNU Make
 * Python 3.5 or 3.6
 * Python3-dev package (must be compatible with Python 3.5 or 3.6)
+* Make sure both hyperthreading and frequency scaling are disabled for maximum performance.
 
 Python prerequisites:
 * Tensorflow (tested with version 1.13.1)
@@ -45,6 +46,8 @@ All tools and microbenchmarks are available under the "bin" directory. Use "-\-h
 Tools:
 * ``tool_classifier.exe:`` Use this tool to evaluate NuevoMatch against CutSplit [5], NeuroCuts [4], and TupleMerge [6].
 * ``tool_trace_generator.exe:`` Generates accurate packet traces (5-tuple + matched priority) from ClassBench files with uniform rule distribution.
+* ``tool_locality.exe:`` Locality tool for generating skewed traces. Can be used to extract temporal locality from PCAP files (together with tcpdump), or
+to generate Zipf distribution with various parameters.
 * ``nuevomatch.py:`` Generates NuevoMatch classifiers from ClassBench files. 
 * ``ruleset_analysis.py:`` Analyze ClassBench rulesets. Mainly used for debugging iSets.
 * ``pack_neurocuts.py:`` Converts NeuroCuts [4] classifiers to binary files that can be read using our native implementation of NeuroCuts.
@@ -63,8 +66,13 @@ MIT license. See LICENSE.md for more details.
 ____
 
 [1] A computational approach to packet classification
+
 [2] Classbench: A packet classification benchmark (ACM TON, 2007)
+
 [3] The case for learned index structures (ACM SIGMOD, 2018)
+
 [4] Neural packet classification (ACM SIGCOMM, 2019)
+
 [5] Cutsplit: A decision-tree combining cutting and splitting for scalable packet classification (IEEE INFOCOM, 2018)
+
 [6] TupleMerge: Fast software packet processing for online packet classification (ACM TON, 2019)

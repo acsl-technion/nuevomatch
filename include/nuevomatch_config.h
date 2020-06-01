@@ -90,7 +90,24 @@ struct NuevoMatchConfig {
 	bool external_remainder = false;
 
 	/**
+	 * @brief Force rebuilding the external classifier at runtime.
+	 */
+	bool force_rebuilding_remainder = false;
+
+	/**
+	 * @brief Set an arbitrary allocation of subsets to cores
+	 *        Format: 0=1,2;1=3,4,5 Will put subsets {1,2} on core 0 and subsets {3,4,5} on core 1
+	 */
+	std::string arbitrary_subset_clore_allocation;
+
+	/**
 	 * @brief Run NuevoMatch on any subset of fields of the original dataset
 	 */
 	std::vector<uint32_t> arbitrary_fields;
+
+	/**
+	 * @brief A string representation of the external classifier type,
+	 *        in case a new one will be built
+	 */
+	std::string remainder_type;
 };

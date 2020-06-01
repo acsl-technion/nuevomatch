@@ -24,6 +24,7 @@
 #include <sys/time.h>
 #include <stdexcept>
 #include <queue>
+#include <stack>
 
 #include <object_io.h> // <AR>
 #include <hyper_split.h>
@@ -103,6 +104,13 @@ int HyperSplitTrie::BuildHSTree (rule_set_t* ruleset, hs_node_t* currNode, unsig
 	currNode->ruleset = NULL;
 	currNode->child[0] = NULL;
 	currNode->child[1] = NULL;
+
+	// <AR> Add the maximum priority for each node
+	int max_priority = 0x7fffffff;
+	for (unsigned int i=0; i<ruleset->num; ++i) {
+		max_priority = std::min(max_priority, (int)ruleset->ruleList[i].pri);
+	}
+	currNode->max_priority = max_priority;
 
     /*Update Leaf node*/
     if(ruleset->num <= binth)
@@ -440,13 +448,16 @@ int HyperSplitTrie::BuildHSTree (rule_set_t* ruleset, hs_node_t* currNode, unsig
  *  Description:  test the hyper-split-tree with give 4-tuple packet
  * =====================================================================================
  */
-int LookupHSTree(hs_node_t* node, const uint32_t* header) {
+int LookupHSTree(hs_node_t* node, const uint32_t* header, int priority) {
 
 	int cover = 1;
 	int match = 0;
 	unsigned int i,k;
 
 	while (node->child[0] != NULL) {
+		// <AR> priority optimization
+		if ( (priority>=0) && (priority < node->max_priority) ) return priority;
+
 		if (header[node->d2s] <= (node->thresh)){
 			node = node->child[0];
 		}
@@ -456,6 +467,9 @@ int LookupHSTree(hs_node_t* node, const uint32_t* header) {
 	}
 
 	if(node != NULL){
+		// <AR> priority optimization
+		if ( (priority>=0) && (priority < node->max_priority) ) return priority;
+
 		for(i = 0; i < node->ruleset->num; i++){
 			cover = 1;
 			for(k = 0; k < DIM; k++){
@@ -475,12 +489,14 @@ int LookupHSTree(hs_node_t* node, const uint32_t* header) {
 
 	if(match == 1){
 		//printf("\n>>Matched Rule %d\n", node->ruleset->ruleList[i].pri);
-		return node->ruleset->ruleList[i].pri;
+		return std::min((uint32_t)priority, (uint32_t)node->ruleset->ruleList[i].pri);
 	}else{
-		return -1;
+		return priority;
 	}
 
 }
+
+
 
 /**
  * @brief Export hs_node_t array to byte array
@@ -575,6 +591,7 @@ hs_node_t* HyperSplitTrie_unpack(ObjectReader& reader) {
 		reader >> current->depth;
 		reader >> current->thresh;
 		current->ruleset = nullptr;
+		current->max_priority = -1;
 
 		// Unpack the rule-set
 		uint32_t rule_num;
@@ -611,7 +628,47 @@ hs_node_t* HyperSplitTrie_unpack(ObjectReader& reader) {
 		}
 	}
 
+	// Calculate maximum priority using DFS
+	stack<hs_node_t*> node_stack;
+	node_stack.push(&output[0]);
+	while (!node_stack.empty()) {
+		hs_node_t* current =node_stack.top();
+	   // In case the current node has already priority
+	   if (current->max_priority > 0) {
+		   node_stack.pop();
+		   continue;
+	   }
+
+	   bool has_children =
+			   (current->child[0] != nullptr) ||
+			   (current->child[1] != nullptr);
+
+	   // In case of leaf
+	   if (!has_children) {
+		   int max_priority = 0x7fffffff;
+		   for (unsigned int i=0; i<current->ruleset->num; ++i) {
+			   max_priority = std::min(max_priority, (int)current->ruleset->ruleList[i].pri);
+		   }
+		   current->max_priority = max_priority;
+		   node_stack.pop();
+	   }
+	   // In case the child nodes of this should be processed
+	   else if (current->max_priority == -1) {
+		   for (uint32_t j=0; j<2; ++j) {
+			   if (current->child[j] != nullptr) {
+				   node_stack.push(current->child[j]);
+			   }
+		   }
+		   current->max_priority = -2;
+	   }
+	   // The childs of this were already processed
+	   else if (current->max_priority == -2) {
+		   int child_0_prio = (current->child[0] != nullptr) ? current->child[0]->max_priority : 0;
+		   int child_1_prio = (current->child[1] != nullptr) ? current->child[1]->max_priority : 0;
+		   current->max_priority = (child_0_prio < child_1_prio) ? child_0_prio : child_1_prio;
+		   node_stack.pop();
+	   }
+	}
 	return output;
 }
-
 

@@ -25,6 +25,7 @@
 #include <time.h>
 #include <bits/stdc++.h> // UINT_MAX
 #include <set>
+#include <array>
 
 #include <basic_types.h>
 #include <pipeline_thread.h>
@@ -35,6 +36,7 @@
 #include <interval_set.h>
 
 #include <cut_split.h>
+#include <tuple_merge.h>
 #include <rule_db.h>
 
 /**
@@ -49,9 +51,9 @@ protected:
 
 	typedef struct {
 		classifier_output_t results[N];
+		std::array<uint32_t, N> packet_id;
 		volatile uint32_t lock;
 		uint32_t counter;
-		uint32_t first_packet_counter;
 		uint32_t valid_items;
 	} reducer_job_t;
 
@@ -173,16 +175,18 @@ public:
 	/**
 	 * @brief Start an asynchronous process of classification for an input packet.
 	 * @param header An array of 32bit integers according to the number of supported fields.
+	 * @param priority The priority of a previous matching rule.
+	 * Stops classifiying when there is no potential better priority
 	 * @returns A unique id for the packet
 	 */
-	uint32_t classify_async(const uint32_t* header);
+	virtual unsigned int classify_async(const unsigned int* header, int priority);
 
 	/**
 	 * @brief Start a synchronous process of classification an input packet.
 	 * @param header An array of 32bit integers according to the number of supported fields.
 	 * @returns The matching rule action/priority (or 0xffffffff if not found)
 	 */
-	uint32_t classify_sync(const uint32_t* header) {
+	virtual unsigned int classify_sync(const unsigned int* header, int priority) {
 		throw std::runtime_error("NuevoMatch can only perform asynchronous classification");
 	}
 
@@ -196,6 +200,12 @@ public:
 	 * @brief Resets the all classifier counters
 	 */
 	virtual void reset_counters();
+	
+	/**
+         * @brief Advance the packet counter. Should be used when skipping 
+         * classification of packets, such as with caches.
+         */
+        virtual void advance_counter();
 
 	/**
 	 * @brief Returns a string representation of this
@@ -206,10 +216,20 @@ public:
 private:
 
 	/**
+	 * @brief Processes a new batch of packets. 
+	 */
+	void process_batch();
+
+	/**
 	 * @brief Loads all subsets (iSets/Remainder) from file
 	 * @param reader An object-reader with binary data
 	 */
 	void load_subsets(ObjectReader& reader);
+
+        /**
+         * @brief Manually build remainder classifier
+         */
+        ObjectReader build_remainder();
 
 	/**
 	 * @brief Loads the remainder classifier from file

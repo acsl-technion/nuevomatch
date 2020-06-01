@@ -43,6 +43,7 @@ private:
 		// Arrays
 		uint32_t *rule_indices;
 		uint32_t *child_indices;
+		int max_priority;
 		range field[DIM];
 		// HyperSplit SubTree
 		hs_node_t* rootnode;
@@ -95,7 +96,7 @@ public:
 	 * @brief Perform packet lookup
 	 * @param header The packet header
 	 */
-	int lookup(const uint32_t* header);
+	int lookup(const uint32_t* header, int priority);
 
 	/**
 	 * @brief Packs the trie to byte-array
@@ -234,16 +235,20 @@ public:
 	/**
 	 * @brief Start an asynchronous process of classification for an input packet.
 	 * @param header An array of 32bit integers according to the number of supported fields.
+	 * @param priority The priority of a previous matching rule.
+	 * Stops classifiying when there is no potential better priority
 	 * @returns A unique id for the packet
 	 */
-	uint32_t classify_async(const uint32_t* header);
+	virtual unsigned int classify_async(const unsigned int* header, int priority);
 
 	/**
 	 * @brief Start a synchronous process of classification an input packet.
 	 * @param header An array of 32bit integers according to the number of supported fields.
+	 * @param priority The priority of a previous matching rule.
+	 * Stops classifiying when there is no potential better priority
 	 * @returns The matching rule action/priority (or 0xffffffff if not found)
 	 */
-	uint32_t classify_sync(const uint32_t* header);
+	virtual unsigned int classify_sync(const unsigned int* header, int priority);
 
 	/**
 	 * @brief Prints statistical information

@@ -107,20 +107,10 @@ protected:
 		// Get the instance
 		NuevoMatchWorker* instance = static_cast<NuevoMatchWorker*>(args);
 
+		// Initiate output
 		ActionBatch<N> output;
-
-		// Perform classification on remainder classifier
-		if (!instance->_configuration->disable_all_classification &&
-			!instance->_configuration->disable_remainder &&
-			instance->_remainder != nullptr)
-		{
-			output = instance->_remainder->classify(job.packets);
-		}
-		// No remainder classifier, reset all outputs to be invalid
-		else {
-			for (uint32_t i=0; i<N; ++i) {
-				output[i] = {-1, -1};
-			}
+		for (uint32_t i=0; i<N; ++i) {
+			output[i] = {-1, -1};
 		}
 
 		// In case no classification should be done at all
@@ -236,6 +226,14 @@ protected:
 
 			} // For Packet in batch
 		} // If any iSet exists
+
+
+		// Perform classification on remainder classifier
+		if (!instance->_configuration->disable_remainder &&
+			instance->_remainder != nullptr)
+		{
+			output = instance->_remainder->classify(job.packets, output);
+		}
 
 		instance->publish_results(output, job.batch_id);
 		return true;

@@ -141,6 +141,7 @@ typedef struct hs_node_s
     unsigned int		d2s;		/* dimension to split, 2bit is enough */
     unsigned int		depth;		/* tree depth of the node, x bits supports 2^(2^x) segments */
 	unsigned int		thresh;		/* thresh value to split the current segments */
+	int max_priority; // <AR>
 	rule_set_t* ruleset;
 	struct hs_node_s*	child[2];	/* pointer to child-node, 2 for binary split */
 } hs_node_t;
@@ -177,7 +178,7 @@ public:
 };
 
 /* lookup hyper-split-tree */
-int LookupHSTree(hs_node_t* rootnode, const uint32_t* header);
+int LookupHSTree(hs_node_t* rootnode, const uint32_t* header, int priority);
 
 /**
  * @brief Export hs_node_t array to byte array

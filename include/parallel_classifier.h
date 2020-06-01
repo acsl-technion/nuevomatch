@@ -110,7 +110,7 @@ private:
 		// Process all packets in the batch
 		for (uint32_t i=0; i<N; ++i) {
 			// Perform classification
-			classifier->classify_async(job.packets[i]);
+			classifier->classify_async(job.packets[i], -1);
 		}
 
 		// Request lock for publishing
@@ -308,7 +308,7 @@ public:
 	 * @param header An array of 32bit integers according to the number of supported fields.
 	 * @returns A unique id for the packet
 	 */
-	virtual unsigned int classify_async(const unsigned int* header) {
+	virtual unsigned int classify_async(const unsigned int* header, int priority) {
 		// Default packet counter is invalid packet
 		uint32_t packet_counter = 0xffffffff;
 		// Feed next batch
@@ -356,7 +356,7 @@ public:
 	 * @param header An array of 32bit integers according to the number of supported fields.
 	 * @returns The matching rule action/priority (or 0xffffffff if not found)
 	 */
-	uint32_t classify_sync(const uint32_t* header) {
+	uint32_t classify_sync(const uint32_t* header, int priority) {
 		throw std::runtime_error("NuevoMatch parallel classifier can only perform asynchronous classification");
 	}
 

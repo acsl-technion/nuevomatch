@@ -4,174 +4,198 @@
 
 error_status=0
 error_messages=
+error_cause=
 
 function add_message() {
 	error_messages=$(echo -e "$@\n$error_messages")
 	error_status=1
 }
 
+# Prints message to screen
+function show() {
+	echo -n "$@... "
+}
+
+# Sets the cause for error
+function set_error() {
+	error_cause="$@."
+}
+
+# Evaluate and check
+function check() {
+	eval "$@" &>/dev/null
+	if (( $? != 0)); then
+		echo "error"
+		add_message $error_cause
+	else
+		echo "ok"
+	fi
+}
+
+# Evaluate and check, fail on error
+function check-fail() {
+	eval "$@" &>/dev/null
+	if (( $? != 0)); then
+		echo "fatal error"
+		add_message $error_cause
+		print-status
+	else
+		echo "ok"
+	fi
+}
+
+# Print status
+function print-status() {
+	echo "======="
+	if [[ $error_status == 1 ]]; then
+		echo "Configure has failed due to the following reasons:"
+		echo "$error_messages"
+		echo "FAIL"
+		exit 1
+	else
+		echo "Configure completed successfully. Run make -f to compile NuevoMatch."
+	fi
+}
+
 # Check python version
-echo -n "Checking python version... "
-python_version=$( /usr/bin/env python3 --version | cut -d " " -f 2 )
-if (( $? != 0)); then
-  echo "error"
-  add_message "Cannot get version of python3."
+show "Checking python"
+set_error "Cannot get version of python3"
+check /usr/bin/env python3 --version | cut -d " " -f 2
 
-else
-  echo "ok"
-fi
-
+python_version=$(/usr/bin/env python3 --version | cut -d " " -f 2)
 python35_okay=$( echo $python_version | awk '$1 >= 3.5 {print 1}' )
 python36_okay=$( echo $python_version | awk '$1 >= 3.6 {print 1}' )
 
-if [[ $python35_okay != 1 ]]; then
-  echo "Warning: Python version should be at least 3.5"
-fi
+show "Checking python version"
+set_error "Python version should be at least 3.5"
+check [[ $python35_okay == 1 ]]
+
 
 # Set the python-dev include path
-echo -n "Checking for python include path... "
 if [[ $python36_okay ]]; then
 	export python_include_path=/usr/include/python3.6
 else
 	export python_include_path=/usr/include/python3.5
 fi
 
-if [[ ! -d $python_include_path ]]; then
-	echo "error"
-	add_message "Python include directory ($python_include_path) is missing. Make sure the python-dev package is installed."
-else
-	echo "ok"
-fi
+show "Checking for python include path"
+set_error "Python include directory ($python_include_path) is missing. Make sure the python-dev package is installed."
+check [[ -d $python_include_path ]]
+
 
 # Check whether python-dev is installed
-echo -n "Checking whether python-dev is available on machine... "
-if [[ ! -e $python_include_path/Python.h ]]; then
-	echo "error"
-	add_message "Cannot access file '$python_include_path/Python.h'. Make sure the python-dev package is installed."
-else
-	echo "ok"
-fi
+show "Checking whether python-dev is available on machine"
+set_error "Cannot access file '$python_include_path/Python.h'. Make sure the python-dev package is installed."
+check [[ -e $python_include_path/Python.h ]]
 
 # Python prerequisites
 libraries=( tensorflow numpy distutils matplotlib )
 for lib in ${libraries[@]}; do
-	echo -n "Checking Python prerequisite '$lib'... "
-	python -c "import $lib" &> /dev/null
-	if [[ $? != 0 ]]; then
-		echo "error"
-		add_message "Cannot import python library $lib. Make sure it is installed."
-
-	else
-		echo "ok"
-	fi
+	show "Checking Python prerequisite '$lib'"
+	set_error "Cannot import python library $lib. Make sure it is installed."
+	check python -c "import $lib"
 done
 
 # FMA support
-echo -n "Checking for AVX2/FMA support... "
-if [[ $(grep fma /proc/cpuinfo | wc -l) -eq 0 ]]; then
-	echo "error"
-	add_message "CPU does not support AVX2/FMA extensions."
-else
-	echo "ok"
-fi
+show "Checking for AVX2/FMA support"
+set_error "CPU does not support AVX2/FMA extensions."
+check [[ $(grep fma /proc/cpuinfo | wc -l) -ne 0 ]]
 
 # G++ Available
-echo -n "Checking whether g++ is available... "
-if [[ $(which g++ | wc -l) -eq 0 ]]; then
-	echo "error"
-	add_message "g++ was not found on the system."
-else
-	echo "ok"
-fi
+show "Checking whether g++ is available"
+set_error "g++ was not found on the system."
+check [[ $(which g++ | wc -l) -ne 0 ]]
 
 
 # Make Bin directory and sub-makefiles
 BIN_DIR=$(dirname $0)/bin
 mkdir -p $BIN_DIR 2>/dev/null
 
-echo -n "Generating sub-makefiles..."
-
+# Get all object files
 files="$(find src/ -name "*.cpp") "
 files+="$(find tools/ -name "*.cpp") "
+
 logfile=$BIN_DIR/makefile.log
 
+# Generate makefile for source file $1
+# All other params are additional arguments for G++
+# @param $1 Source-code filename
+# @param $2 Compile flags
 function generate_makefile() {
 	name=$(basename $1)
 	filename="${name%.*}"
-	g++ -mavx2 -mfma -I./include/ -MM $1 > $BIN_DIR/$filename.mk
-	sed -i "s@^\(.*\.o\):@$BIN_DIR/\1:@" $BIN_DIR/$filename.mk
-	echo -e "\t\$(CXX) \$(CXXFLAGS) \$(SIMDFLAGS) \$(DBGFLAGS) \$(INCLUDES) \$(LIBRARIES) " \
-	     "-c $1 -o $BIN_DIR/$filename.o\n" >> $BIN_DIR/$filename.mk	
+	g++ -std=c++11 -mavx2 -mfma -I./include/ -MM $1 > $BIN_DIR/$filename.mk 2>$logfile
+	sed -i "s@^\(.*\.o\):@$BIN_DIR/\1:@" $BIN_DIR/$filename.mk 2>$logfile
+	echo -e "\t\$(CXX) ${@:2:99} \$(INCLUDES) \$(LIBRARIES)" \
+	     "-c $1 -o $BIN_DIR/$filename.o\n" >> $BIN_DIR/$filename.mk 2>$logfile
 }
 
-flag=0
 for f in $files; do
-	generate_makefile $f 2>$logfile
-	if [[ $? -ne 0 ]]; then
-		echo "error"
-		add_message "Error generating sub-makefiles. See '$logfile' for details."
-		flag=1
-		break
-	fi
+	n=$(basename $f)
+	show "Generating makefile for $n"
+	set_error "Error generating sub-makefile for $n. See '$logfile' for details."
+	check generate_makefile $f "\$\(CXXFLAGS\) \$\(SIMDFLAGS\) \$\(DBGFLAGS\)"
 done
 
-if [[ $flag -eq 0 ]]; then
-	# Merge all sub-makefiles
-	sub_files=$(ls $BIN_DIR/*.mk | grep -v "objects.mk")
+# Make sub-makefile for vendor adapter
+files="$(find vendor/ -name "*.cpp") "
+for f in $files; do
+	n=$(basename $f)
+	show "Generating makefile for $n"
+	set_error "Error generating sub-makefile for $n. See '$logfile' for details."
+	check generate_makefile $f "-O2 -std=c++14 -fpermissive \$\(DBGFLAGS\)"
+done
+
+# Merge all makefiles
+function merge_makefiles() {
+	sub_files=$(ls $BIN_DIR/*.mk | grep -v "objects.mk")	
 	cat $sub_files > $BIN_DIR/objects.mk
 	echo "$sub_files" | xargs rm -f
-	echo "ok"
-fi
+}
+
+show "Merging all makefiles"
+set_error "Could not merge generated makefiles into objects.mk"
+check merge_makefiles
 
 # Clone TupleMerge and compile it
 
 my_dir=$PWD
-tuplemerge_dir=tuplemerge
+TUPLEMERGE_DIR=tuplemerge
+logfile=$TUPLEMERGE_DIR/errors.log
 
-if [[ ! -d $tuplemerge_dir ]]; then
-	echo -n "Cloning TupleMerge from GitHub... "
-	git clone https://github.com/drjdaly/tuplemerge $tuplemerge_dir &> /dev/null
-	cd $tuplemerge_dir
+if [[ ! -d $TUPLEMERGE_DIR ]]; then
+	show "Cloning TupleMerge from GitHub"
+	git clone https://github.com/drjdaly/tuplemerge $TUPLEMERGE_DIR &> /dev/null
+	cd $TUPLEMERGE_DIR
 	git checkout tags/v1.0 &> /dev/null
+	echo "ok"
+
+	show "Patching TupleMerge"
+	set_error "Error pactching TupleMerge. Try to patch manually with tuplemerge.patch"
+	git checkout tags/v1.0 &>/dev/null
+	git reset --hard tags/v1.0 &>/dev/null
+	check-fail git apply --ignore-whitespace --ignore-space-change ../tuplemerge.patch
 	cd $my_dir
-	echo "ok"
 fi
 
+function compile_tuplemerge() {
+	make -C $TUPLEMERGE_DIR -j &> $logfile
+}
 
-echo -n "Compiling TupleMerge... "
-logfile=$tuplemerge_dir/errors.log
-make -C $tuplemerge_dir -j &> $logfile
-if [[ $? -ne 0 ]]; then
-	echo "error"
-	add_message "Error compiling TupleMerge. See '$logfile' for deatils."
-else
-	echo "ok"
-fi
+show "Compiling TupleMerge"
+set_error "Error compiling TupleMerge. See '$logfile' for deatils."
+check compile_tuplemerge
 
-echo -n "Creating libtuplemerge.a... "
-logfile=$tuplemerge_dir/libtuplemerge.log
-ar crf $BIN_DIR/libtuplemerge.a \
-	$tuplemerge_dir/cmap.o \
-	$tuplemerge_dir/TupleSpaceSearch.o \
-	$tuplemerge_dir/TupleMergeOnline.o \
-	$tuplemerge_dir/TupleMergeOffline.o \
-	$tuplemerge_dir/SlottedTable.o \
-	$tuplemerge_dir/Simulation.o \
-	$tuplemerge_dir/MapExtensions.o 2> $logfile
-if [[ $? -ne 0 ]]; then
-	echo "error"
-	add_message "Could not generate libtuplemerge.a. See '$logfile' for deatils."
-else
-	echo "ok"
-fi
 
-echo "======="
-# Print status
-if [[ $error_status == 1 ]]; then
-	echo "Configure has failed due to the following reasons:"
-	echo "$error_messages"
-	echo "FAIL"
-	exit 1
-else
-	echo "Configure completed successfully. Run make -f to compile NuevoMatch."
-fi
+show "Creating libtuplemerge.a"
+set_error "Could not generate libtuplemerge.a. See '$logfile' for deatils."
+check ar crf $BIN_DIR/libtuplemerge.a \
+             $TUPLEMERGE_DIR/cmap.o \
+             $TUPLEMERGE_DIR/TupleSpaceSearch.o \
+             $TUPLEMERGE_DIR/TupleMergeOnline.o \
+             $TUPLEMERGE_DIR/TupleMergeOffline.o \
+             $TUPLEMERGE_DIR/SlottedTable.o \
+             $TUPLEMERGE_DIR/Simulation.o \
+             $TUPLEMERGE_DIR/MapExtensions.o &>> $logfile
+
+print-status

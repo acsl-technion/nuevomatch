@@ -28,6 +28,7 @@
 #include <math.h>
 #include <regex.h>
 #include <list>
+#include <set>
 #include <vector>
 #include <sys/mman.h> // mmap
 
@@ -37,11 +38,13 @@
 #include <cut_split.h>
 #include <efficuts.h>
 #include <neurocuts.h>
+#include <tuple_merge.h>
 #include <nuevomatch.h>
 #include <rule_db.h>
 #include <nuevomatch_config.h>
 #include <parallel_classifier.h>
 #include <string_operations.h>
+#include <em_table.h>
 
 // Internal methods
 list<openflow_rule> read_rule_db();
@@ -49,12 +52,13 @@ list<openflow_rule> read_rule_db();
 // Holds arguments information
 static argument_t my_arguments[] = {
 		// Name,						Required,	IsBoolean,	Default,	Help
-		{"-m",							1,			0,			NULL,		"Set classifier type. Valid options are: [neurocuts, cutsplit, efficuts, nuevomatch]."},
+		{"-m",							1,			0,			NULL,		"Set classifier type. Valid options are: [neurocuts, cutsplit, efficuts, tuplemerge, nuevomatch]."},
 		{"-in",							0,			0,			NULL,		"Input file. Meaning changes across modes."},
 
 		/* Create Mode */
 		{"-c",							0,			1,			NULL,		"(Create Mode) Generate new classifier."},
 		{"-out",						0,			0,			NULL,		"(Create Mode) Name of output packed classifier."},
+		{"--indices",					0,			0,			NULL,		"(Create Mode) Override rule indices when creating classifier."},
 
 		/* Load Mode */
 		{"-l",							0,			1,			NULL,		"(Load Mode) Load packed classifier from file"},
@@ -65,6 +69,9 @@ static argument_t my_arguments[] = {
 		/* CutSplit / EfiiCuts Modes */
 		{"--binth",						0,			0,			"8",		"(EffiCuts / CutSplit Mode) Binth value."},
 		{"--threshold",					0,			0,			"24",		"(CutSplit Mode) Threshold value."},
+
+		/* TupleMerge Mode */
+		{"--collision-limit",			0,			0,			"10",		"(TupleMerge) Collision-limit value"},
 
 		/* NuevoMatch Mode */
 		{"--disable-isets",				0,			1,			NULL,		"(NuevoMatch Mode) Disable iSets when performing classification."},
@@ -78,13 +85,20 @@ static argument_t my_arguments[] = {
 		{"--start-from-iset",			0,			0,			"0",		"(NuevoMatch Mode) The index of iSet to start NuevoMatch with" },
 		{"--arbitrary-fields",			0,			0,			NULL,		"(NuevoMatch Mode) Run NuevoMatch on any subset of fields."
 																			"Usage: --arbitrary-fields \"1,2,6\""},
+		{"--arbitrary-core-allocation",	0,			0,			"",			"(NuevoMatch Mode) Manually set the subset-core allocation."
+																					"Example: use \"0=1,3;2=4,5\" to allocate subsets {1,3}"
+																					"to core 0, and subset {4,5} to core 2. Remainder subset is always 0."},
 
+		{"--force-remainder-build",		0,			1,			NULL,		"(NuevoMatch Mode) Force rebuilding the remainder classifier on the fly."},
 		{"--remainder-type",			0,			0,			"cutsplit",	"(NuevoMatch Mode) Set NuevoMatch remainder classifier."
-																			"Valid options are: [cutsplit, efficuts, nuerocuts]."
+																			"Valid options are: [cutsplit, efficuts, nuerocuts, tuplemerge]."
 																			"Note: flags for CutSplit / EffiCuts are valid for the remainder classifier as well."},
 		{"--external-remainder",		0,			0,			NULL,		"(NuevoMatch Mode) Load the remainder classifier from a file."
 																			"Note: requires the '--remainder-type' flag."
 																			"Usage: --external-remainder FILENAME"},
+
+		/* Caching */
+		{"--cache",						0,			1,			NULL,		"Add small & simple exact-match cache before classifier."},
 
 		/* Parallel Mode */
 		{"--parallel",					0,			0,			"1",		"(Parallel Mode) Start any classifier with X parallel threads. "},
@@ -110,6 +124,11 @@ trace_packet* trace_packets;
 uint32_t start_packet, end_packet;
 volatile bool fail_fast;
 
+/**
+ * @brief Exact match table to help with skewed traffic
+ */
+ExactMatchTable* em_table;
+
 class BenchmarkListener : public GenericClassifierListener {
 public:
 
@@ -129,6 +148,8 @@ public:
 		if (id != 0xffffffff) {
 			// Skip invalid packets
 			if (num_of_results < (end_packet-start_packet)) {
+				// Cache packet
+				em_table->add(trace_packets[start_packet+id], priority);
 				// Check result match trace
 				if (!silent && (uint32_t)action != trace_packets[start_packet+id].match_priority) {
 					warningf("packet %u does not match!. Got: %u, expected: %u",
@@ -192,6 +213,12 @@ CutSplit* mode_cutsplit() {
 		fwrite(buffer, sizeof(uint8_t), size, file);
 		fclose(file);
 
+		// Load the classifier from buffer, should be faster
+		free(output);
+		output = new CutSplit(threshold, binth);
+		ObjectReader classifier_handler(buffer, size);
+		output->load(classifier_handler);
+
 		messagef("Done.");
 	}
 	// Mode load
@@ -207,6 +234,79 @@ CutSplit* mode_cutsplit() {
 
 		// Load the classifier
 		output = new CutSplit(threshold, binth);
+		output->load(classifier_handler);
+	}
+
+	return output;
+}
+
+/**
+ * @brief Work in TupleMerge mode
+ */
+TupleMerge* mode_tuplemerge() {
+
+	// Modes
+	bool mod_generate = ARG("-c")->available;
+	bool mod_load = ARG("-l")->available;
+
+	// Inputs and outputs
+	argument_t* input_arg = ARG("-in");
+	argument_t* output_arg = ARG("-out");
+
+	TupleMerge* output = nullptr;
+
+	// In case of mode generate
+	if (mod_generate) {
+		messagef("Generating new TupleMerge classifier. Input: Classbench rule database. Output: classifier file");
+
+		if (!input_arg->available || !output_arg->available) {
+			throw error("Cannot generate classifier: -in and -out arguments are required");
+		}
+
+		// Load the rule-db
+		list<openflow_rule> rule_db = read_rule_db();
+
+		// Generate CutSplit classifier
+		messagef("Generating TupleMerge classifier...");
+		uint32_t limit = atoi(ARG("--collision-limit")->value);
+		output = new TupleMerge(limit);
+		output->build(rule_db);
+
+		// Pack the classifier to bytes
+		messagef("Packing classifier to %s...", output_arg->value);
+		uint8_t *buffer;
+		uint32_t size;
+		output->pack().pack(&buffer, &size);
+
+		// Write the output file
+		FILE* file = fopen(output_arg->value, "w");
+		if (!file) {
+			throw error("cannot open output filename");
+		}
+		fwrite(buffer, sizeof(uint8_t), size, file);
+		fclose(file);
+
+		// Load the classifier from buffer, should be faster
+		free(output);
+		output = new TupleMerge();
+		ObjectReader classifier_handler(buffer, size);
+		output->load(classifier_handler);
+
+		messagef("Done.");
+	}
+	// Mode load
+	else if (mod_load) {
+		messagef("Loading TupleMerge classifier from file. Input: classifier filename");
+
+		if (!input_arg->available) {
+			throw error("-in Argument is required with classifier filename");
+		}
+
+		// Read classifier file to memory
+		ObjectReader classifier_handler(input_arg->value);
+
+		// Load the classifier
+		output = new TupleMerge();
 		output->load(classifier_handler);
 	}
 
@@ -343,6 +443,8 @@ GenericClassifier* mode_nuevomatch() {
 	config.disable_bin_search = ARG("--disable-bin-search")->available;
 	config.disable_validation_phase = ARG("--disable-validation")->available;
 	config.disable_all_classification = ARG("--disable-classification")->available;
+	config.arbitrary_subset_clore_allocation = ARG("--arbitrary-core-allocation")->value;
+	config.force_rebuilding_remainder = ARG("--force-remainder-build")->available;
 
 	// Arbitrary field argument
 	if (ARG("--arbitrary-fields")->available) {
@@ -357,6 +459,7 @@ GenericClassifier* mode_nuevomatch() {
 
 	// Get the remainder type. Default is CutSplit
 	const char* remainder_type = ARG("--remainder-type")->value;
+	config.remainder_type = remainder_type;
 
 	// Build new remainder classifier according to type
 	if (!strcmp(remainder_type, "cutsplit")) {
@@ -365,6 +468,10 @@ GenericClassifier* mode_nuevomatch() {
 		config.remainder_classifier = new EffiCuts(binth);
 	} else if (!strcmp(remainder_type, "neurocuts")) {
 		config.remainder_classifier = new NeuroCuts();
+	} else if (!strcmp(remainder_type, "tuplemerge")) {
+		config.remainder_classifier = new TupleMerge();
+		 // Note: this is due to licb critical error when trying to build base on previous data and failing!
+		config.force_rebuilding_remainder = true;
 	} else {
 		throw errorf("Remainder classifier type is not valid. Got '%s'.", remainder_type);
 	}
@@ -454,181 +561,207 @@ GenericClassifier* mode_nuevomatch() {
  * @brief Main entry point
  */
 int main(int argc, char** argv) {
+ try{
+ 	// Parse arguments
+ 	parse_arguments(argc, argv, my_arguments);
+ 
+ 	// Get working mode
+ 	const char* mode = ARG("-m")->value;
+ 
+ 	// Get classifier according to mode
+ 	GenericClassifier* classifier = nullptr;
+ 	bool nuevomatch_enabled = false;
+ 
+ 	if (strcmp(mode, "cutsplit") == 0) {
+ 		classifier = mode_cutsplit();
+ 	} else if (strcmp(mode, "nuevomatch") == 0) {
+ 		classifier = mode_nuevomatch();
+ 		nuevomatch_enabled = true;
+ 	} else if (strcmp(mode, "efficuts") == 0) {
+ 		classifier = mode_efficuts();
+ 	} else if (strcmp(mode, "neurocuts") == 0) {
+ 		classifier = mode_neurocuts();
+ 	} else if (strcmp(mode, "tuplemerge") == 0) {
+ 		classifier = mode_tuplemerge();
+ 	} else {
+ 		throw error("mode is invalid");
+ 	}
+ 
+ 	// Print classifier attributes
+ 	if (classifier == nullptr) {
+ 		throw error("classifier was not initialized");
+ 	}
+ 
+ 	messagef("Classifier attributes:");
+ 	messagef("Total rules: %u", classifier->get_num_of_rules());
+ 	messagef("Total size (bytes): %u", classifier->get_size());
+ 	messagef("Build time (ms): %u", classifier->get_build_time());
+ 
+ 	// In case of parallel classifier
+ 	if (!nuevomatch_enabled && ARG("--parallel")->available) {
+ 
+ 		// One core for pushing, other cores for processing
+ 		uint32_t num_of_classifiers = atoi(ARG("--parallel")->value);
+ 		GenericClassifier** classifiers = new GenericClassifier*[num_of_classifiers];
+ 
+ 		// Clone classifiers
+ 		classifiers[0] = classifier;
+ 		for (uint32_t i=1; i<num_of_classifiers; ++i) {
+ 			classifiers[i] = classifier->clone();
+ 		}
+ 
+ 		// Get arguments
+ 		uint32_t queue_size = atoi(ARG("--queue-size")->value);
+ 
+ 		// Set the batch size
+ 		switch (atoi( ARG("--batch-size")->value )) {
+ 		case 512:
+ 			classifier = new ParallelClassifier<512>(queue_size, num_of_classifiers, classifiers);
+ 			break;
+ 		case 256:
+ 			classifier = new ParallelClassifier<256>(queue_size, num_of_classifiers, classifiers);
+ 			break;
+ 		case 128:
+ 			classifier = new ParallelClassifier<128>(queue_size, num_of_classifiers, classifiers);
+ 			break;
+ 		case 64:
+ 			classifier = new ParallelClassifier<64>(queue_size, num_of_classifiers, classifiers);
+ 			break;
+ 		case 32:
+ 			classifier = new ParallelClassifier<32>(queue_size, num_of_classifiers, classifiers);
+ 			break;
+ 		case 16:
+ 			classifier = new ParallelClassifier<16>(queue_size, num_of_classifiers, classifiers);
+ 			break;
+ 		case 8:
+ 			classifier = new ParallelClassifier<8>(queue_size, num_of_classifiers, classifiers);
+ 			break;
+ 		case 4:
+ 			classifier = new ParallelClassifier<4>(queue_size, num_of_classifiers, classifiers);
+ 			break;
+ 		case 2:
+ 			classifier = new ParallelClassifier<2>(queue_size, num_of_classifiers, classifiers);
+ 			break;
+ 		default:
+ 			throw error("--batch-size is valid only with values [2, 4, 8, 16, 32, 64, 128, 256, 512].");
+ 		}
+ 	}
+ 
+ 	// Register a listener for classifier
+ 	BenchmarkListener listener( ARG("--trace-silent")->available );
+ 	classifier->add_listener(listener);
+ 
+ 	// In case of mode trace - initialize trace engine
+ 	bool mod_trace = ARG("--trace")->available;
+ 	if (mod_trace) {
+  	
+	 	// Create exact-match table 
+	 	em_table = new ExactMatchTable(8192, !ARG("--cache")->available);
 
-	// Parse arguments
-	parse_arguments(argc, argv, my_arguments);
+ 		// Fail fast?
+ 		fail_fast = ARG("--trace-fail-fast")->available;
+ 
+ 		// Arbitrary field argument
+ 		vector<uint32_t> arbitrary_fields;
+ 		if (ARG("--arbitrary-fields")->available) {
+ 			static regex re(",");
+ 			arbitrary_fields = string_operations::split(
+ 					ARG("--arbitrary-fields")->value, re, string_operations::str2int);
+ 		}
+ 
+ 		// Read the textual trace file
+ 		messagef("Reading trace file...");
+ 		const char* trace_filename = ARG("--trace")->value;
+ 		uint32_t num_of_packets;
+ 		trace_packets = read_trace_file(trace_filename, arbitrary_fields, &num_of_packets);
+ 		if (!trace_packets) {
+ 			throw error("error while reading trace file");
+ 		}
+ 		messagef("Total %u packets in trace", num_of_packets);
+ 
+ 		// Limit the number of packets
+ 		start_packet = atoi( get_argument_by_name(my_arguments,"--trace-from")->value );
+ 		end_packet   = atoi( get_argument_by_name(my_arguments,"--trace-to")->value );
+ 		if (end_packet > num_of_packets) end_packet = num_of_packets;
+ 
+ 		// Warm cache
+ 		uint32_t warm_repetitions = 5;
+ 		if (ARG("--trace-no-warm")->available) {
+ 			messagef("Skipping cache warm");
+ 			warm_repetitions = 0;
+ 		} else {
+ 			messagef("Warming cache...");
+ 		}
+ 		for (uint32_t r=0; r<warm_repetitions; ++r) {
+ 			messagef("Iteration %u...", r);
+ 			for (uint32_t i=start_packet; i<end_packet; ++i) {
+ 				classifier->classify_async(trace_packets[i].get(), -1);
+ 			}
+ 			// Request to process remaining packets
+ 			classifier->classify_async(nullptr, -1);
+ 			while(listener.num_of_results < (end_packet-start_packet));
+ 			// Reset counters
+ 			listener.num_of_results=0;
+ 			classifier->reset_counters();
+ 			em_table->invalidate();
+ 		}
+ 	}
 
-	// Get working mode
-	const char* mode = ARG("-m")->value;
+	// Chace hit rate
+	double cache_hit=0;
 
-	// Get classifier according to mode
-	GenericClassifier* classifier = nullptr;
-	bool nuevomatch_enabled = false;
+ 	// Perform the experiment, repeat X times
+ 	uint32_t time_to_repeat = atoi( ARG("--trace-repeat")->value );
+ 	messagef("Repeating experiment %u times", time_to_repeat);
+ 
+ 	for (uint32_t i=0; i<time_to_repeat; ++i) {
+ 		if (mod_trace) {
+ 			messagef("Starting trace test for classifier with %u packets...", (end_packet-start_packet));
+ 
+ 			// Reset counters
+ 			classifier->reset_counters();
+ 			listener.num_of_results=0;
+ 			em_table->invalidate();
 
-	if (strcmp(mode, "cutsplit") == 0) {
-		classifier = mode_cutsplit();
-	} else if (strcmp(mode, "nuevomatch") == 0) {
-		classifier = mode_nuevomatch();
-		nuevomatch_enabled = true;
-	} else if (strcmp(mode, "efficuts") == 0) {
-		classifier = mode_efficuts();
-	} else if (strcmp(mode, "neurocuts") == 0) {
-		classifier = mode_neurocuts();
-	} else {
-		throw error("mode is invalid");
-	}
-
-	// Print classifier attributes
-	if (classifier == nullptr) {
-		throw error("classifier was not initialized");
-	}
-
-	messagef("Classifier attributes:");
-	messagef("Total rules: %u", classifier->get_num_of_rules());
-	messagef("Total size (bytes): %u", classifier->get_size());
-	messagef("Build time (ms): %u", classifier->get_build_time());
-
-	// In case of parallel classifier
-	if (!nuevomatch_enabled && ARG("--parallel")->available) {
-
-		// One core for pushing, other cores for processing
-		uint32_t num_of_classifiers = atoi(ARG("--parallel")->value);
-		GenericClassifier** classifiers = new GenericClassifier*[num_of_classifiers];
-
-		// Clone classifiers
-		classifiers[0] = classifier;
-		for (uint32_t i=1; i<num_of_classifiers; ++i) {
-			classifiers[i] = classifier->clone();
-		}
-
-		// Get arguments
-		uint32_t queue_size = atoi(ARG("--queue-size")->value);
-
-		// Set the batch size
-		switch (atoi( ARG("--batch-size")->value )) {
-		case 512:
-			classifier = new ParallelClassifier<512>(queue_size, num_of_classifiers, classifiers);
-			break;
-		case 256:
-			classifier = new ParallelClassifier<256>(queue_size, num_of_classifiers, classifiers);
-			break;
-		case 128:
-			classifier = new ParallelClassifier<128>(queue_size, num_of_classifiers, classifiers);
-			break;
-		case 64:
-			classifier = new ParallelClassifier<64>(queue_size, num_of_classifiers, classifiers);
-			break;
-		case 32:
-			classifier = new ParallelClassifier<32>(queue_size, num_of_classifiers, classifiers);
-			break;
-		case 16:
-			classifier = new ParallelClassifier<16>(queue_size, num_of_classifiers, classifiers);
-			break;
-		case 8:
-			classifier = new ParallelClassifier<8>(queue_size, num_of_classifiers, classifiers);
-			break;
-		case 4:
-			classifier = new ParallelClassifier<4>(queue_size, num_of_classifiers, classifiers);
-			break;
-		case 2:
-			classifier = new ParallelClassifier<2>(queue_size, num_of_classifiers, classifiers);
-			break;
-		default:
-			throw error("--batch-size is valid only with values [2, 4, 8, 16, 32, 64, 128, 256, 512].");
-		}
-	}
-
-	// Register a listener for classifier
-	BenchmarkListener listener( ARG("--trace-silent")->available );
-	classifier->add_listener(listener);
-
-	// In case of mode trace - initialize trace engine
-	bool mod_trace = ARG("--trace")->available;
-	if (mod_trace) {
-
-		// Fail fast?
-		fail_fast = ARG("--trace-fail-fast")->available;
-
-		// Arbitrary field argument
-		vector<uint32_t> arbitrary_fields;
-		if (ARG("--arbitrary-fields")->available) {
-			static regex re(",");
-			arbitrary_fields = string_operations::split(
-					ARG("--arbitrary-fields")->value, re, string_operations::str2int);
-		}
-
-		// Read the textual trace file
-		messagef("Reading trace file...");
-		const char* trace_filename = ARG("--trace")->value;
-		uint32_t num_of_packets;
-		trace_packets = read_trace_file(trace_filename, arbitrary_fields, &num_of_packets);
-		if (!trace_packets) {
-			throw error("error while reading trace file");
-		}
-		messagef("Total %u packets in trace", num_of_packets);
-
-		// Limit the number of packets
-		start_packet = atoi( get_argument_by_name(my_arguments,"--trace-from")->value );
-		end_packet   = atoi( get_argument_by_name(my_arguments,"--trace-to")->value );
-		if (end_packet > num_of_packets) end_packet = num_of_packets;
-
-		// Warm cache
-		uint32_t warm_repetitions = 5;
-		if (ARG("--trace-no-warm")->available) {
-			messagef("Skipping cache warm");
-			warm_repetitions = 0;
-		} else {
-			messagef("Warming cache...");
-		}
-		for (uint32_t r=0; r<warm_repetitions; ++r) {
-			for (uint32_t i=start_packet; i<end_packet; ++i) {
-				classifier->classify_async(trace_packets[i].get());
-			}
-			// Request to process remaining packets
-			classifier->classify_async(nullptr);
-			while(listener.num_of_results < (end_packet-start_packet));
-			// Reset counters
-			listener.num_of_results=0;
-			classifier->reset_counters();
-		}
-	}
-
-	// Perform the experiment, repeat X times
-	uint32_t time_to_repeat = atoi( ARG("--trace-repeat")->value );
-	messagef("Repeating experiment %u times", time_to_repeat);
-
-	for (uint32_t i=0; i<time_to_repeat; ++i) {
-		if (mod_trace) {
-			messagef("Starting trace test for classifier with %u packets...", (end_packet-start_packet));
-
-			// Reset counters
-			classifier->reset_counters();
-			listener.num_of_results=0;
-
-			classifier->start_performance_measurement();
-			// Run the lookup
-			for (uint32_t i=start_packet; i<end_packet; ++i) {
-				classifier->classify_async(trace_packets[i].get());
-			}
-
-			// Request to process remaining packets
-			classifier->classify_async(nullptr);
-
-			// Wait for results
-			while(listener.num_of_results < (end_packet-start_packet));
-			classifier->stop_performance_measurement();
-		}
-
-		bool mod_print = ARG("-v")->available;
-		if (mod_print) {
-			messagef("Classifier Information:");
-			classifier->print( atoi(ARG("-v")->value) );
-		}
-	}
-
-	delete classifier;
-	messagef("done.");
-	return 0;
+ 			classifier->start_performance_measurement();
+ 			// Run the lookup
+ 			for (uint32_t i=start_packet; i<end_packet; ++i) {
+ 				// Check cache for hit
+ 				int hit_priority = em_table->lookup(trace_packets[i]);
+ 				if (hit_priority != -1) {
+					listener.on_new_result(i-start_packet, hit_priority, hit_priority, nullptr);
+					classifier->advance_counter();
+					++cache_hit;
+					continue;
+ 				}
+ 				// On cache miss
+ 				classifier->classify_async(trace_packets[i].get(), -1);
+ 			}
+ 
+ 			// Request to process remaining packets
+ 			classifier->classify_async(nullptr, -1);
+ 
+ 			// Wait for results
+ 			while(listener.num_of_results < (end_packet-start_packet));
+ 			classifier->stop_performance_measurement();
+ 		}
+ 
+ 		bool mod_print = ARG("-v")->available;
+ 		if (mod_print) {
+			messagef("Cache hit rate: %.2f, utilization: %.2f",
+				cache_hit/(end_packet-start_packet), em_table->utilization());
+ 			messagef("Classifier Information:");
+ 			classifier->print( atoi(ARG("-v")->value) );
+ 		}
+ 	}
+ 
+ 	delete classifier;
+ 	messagef("done.");
+  return 0;
+ } catch (std::exception& e) {
+  messagef("%s", e.what());
+  return 1;
+ }
 }
 
 /**
@@ -653,5 +786,23 @@ list<openflow_rule> read_rule_db() {
 	if (rule_db.size() == 0) {
 		throw error("Rule-set has zero rules");
 	}
+
+	// Should the priorities be overridden?
+	filename = ARG("--indices")->value;
+	if (filename != NULL) {
+		ObjectReader reader(filename);
+		set<uint32_t> indices = read_indices_file(reader);
+		if (indices.size() != rule_db.size()) {
+			throw error("Number of indices in indices-file mismatch number of rules");
+		}
+		list<openflow_rule>::iterator rule_it = rule_db.begin();
+		set<uint32_t>::iterator indices_it = indices.begin();
+		for (uint32_t i=0; i<rule_db.size(); ++i) {
+			rule_it->priority = *indices_it;
+			rule_it++;
+			indices_it++;
+		}
+	}
+
 	return rule_db;
 }

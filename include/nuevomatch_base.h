@@ -66,9 +66,9 @@ public:
 	virtual ~NuevoMatchSubset() {};
 
 	/**
-	 * @brief Returns the number of rules of this
+	 * @brief Returns an integer by which subsets are allocated to cores
 	 */
-	virtual uint32_t size() const = 0;
+	virtual uint32_t get_size() const = 0;
 
 	/**
 	 * @brief Returns a string representation of this
@@ -100,24 +100,22 @@ public:
 	 * @param packets A batch of packet headers
 	 * @returns The result of the subset
 	 */
-	ActionBatch<N> classify(PacketBatch<N>& packets) {
-		ActionBatch<N> output;
+	ActionBatch<N> classify(PacketBatch<N>& packets, ActionBatch<N>& output) {
 		for (uint32_t i=0; i<N; ++i) {
 			if (packets[i] == nullptr) {
-				output[i] = {-1, -1};
 				continue;
 			}
-			int result = _classifier->classify_sync(packets[i]);
+			int result = _classifier->classify_sync(packets[i], output[i].priority);
 			output[i] = {result, result};
 		}
 		return output;
 	}
 
 	/**
-	 * @brief Returns the number of rules of this
+	 * @brief Returns an integer by which subsets are allocated to cores
 	 */
-	virtual uint32_t size() const {
-		return _classifier->get_num_of_rules();
+	virtual uint32_t get_size() const {
+		return _classifier->get_size();
 	}
 
 	/**

@@ -20,111 +20,73 @@
  * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  * SOFTWARE.
  */
+
 #pragma once
 
-#include <vector>
-#include <list>
-
-#include <object_io.h>
-#include <rule_db.h>
-
-
-#define CLASSIFIER_FIELDS 5
+#include <generic_classifier.h>
 
 /**
- * @brief Stores output pair for any classifier
+ * @brief Adapter for TupleMergeOnline Classifier
  */
-typedef struct {
-	int priority;
-	int action;
-} classifier_output_t;
-
-class GenericClassifierListener {
+class TupleMerge : public GenericClassifier {
 public:
 
-	/**
-	 * @brief Is invoked by the classifier when new result is available
-	 * @param id A unique packet id
-	 * @param priority The priority of the rule
-	 * @param action The action to take on the packet
-	 * @param args Any additional information
-	 */
-	virtual void on_new_result(unsigned int id, int priority, int action, void* args) = 0;
-	virtual ~GenericClassifierListener() {}
-};
 
-/**
- * @brief Abstract class, used to specify a common interface
- * for different packet classification vectors
- */
-class GenericClassifier {
-protected:
-
-	// Listeners of results of this
-	std::vector<GenericClassifierListener*> _listeners;
-
-	// Counts packets
-	volatile unsigned int _packet_counter;
-
-	// Additional information to pass on new results
-	void* _additional_args;
-
-public:
-
-	GenericClassifier() : _packet_counter(0), _additional_args(nullptr) {}
+	TupleMerge(int limit = 10);
+	~TupleMerge();
 
 	/**
 	 * @brief Build the classifier data structure
 	 * @returns 1 On success, 0 on fail
 	 */
-	virtual int build(const std::list<openflow_rule>& rule_db) = 0;
+	virtual int build(const std::list<openflow_rule>& rule_db);
 
 	/**
 	 * @brief Packs this to byte array
 	 * @returns An object-packer with the binary data
 	 */
-	virtual ObjectPacker pack() const = 0;
+	virtual ObjectPacker pack() const;
 
 	/**
 	 * @brief Creates this from a memory location
 	 * @param object An object-reader instance
 	 */
-	virtual void load(ObjectReader& object) = 0;
+	virtual void load(ObjectReader& object);
 
 	/**
 	 * @brief Returns the number of rules
 	 */
-	virtual unsigned int get_num_of_rules() const = 0;
+	virtual unsigned int get_num_of_rules() const;
 
 	/**
 	 * @brief Returns the memory size of this in bytes
 	 */
-	virtual unsigned int get_size() const = 0;
+	virtual unsigned int get_size() const;
 
 	/**
 	 * @brief Returns the building time of this in milliseconds
 	 */
-	virtual unsigned int get_build_time() const = 0;
+	virtual unsigned int get_build_time() const;
 
 	/**
 	 * @brief Returns the maximum supported number of fields this can classify
 	 */
-	virtual const unsigned int get_supported_number_of_fields() const = 0;
+	virtual const unsigned int get_supported_number_of_fields() const;
 
 	/**
 	 * @brief Starts the performance measurement of this
 	 */
-	virtual void start_performance_measurement() = 0;
+	virtual void start_performance_measurement();
 
 	/**
 	 * @brief Stops the performance measurement of this
 	 */
-	virtual void stop_performance_measurement() = 0;
+	virtual void stop_performance_measurement();
 
 	/**
 	 * @brief clones this to another instance
 	 */
-	virtual GenericClassifier* clone() = 0;
+	virtual GenericClassifier* clone();
 
 	/**
 	 * @brief Start an asynchronous process of classification for an input packet.
@@ -133,7 +95,7 @@ public:
 	 * Stops classifiying when there is no potential better priority
 	 * @returns A unique id for the packet
 	 */
-	virtual unsigned int classify_async(const unsigned int* header, int priority) = 0;
+	virtual unsigned int classify_async(const unsigned int* header, int priority);
 
 	/**
 	 * @brief Start a synchronous process of classification an input packet.
@@ -142,43 +104,26 @@ public:
 	 * Stops classifiying when there is no potential better priority
 	 * @returns The matching rule action/priority (or 0xffffffff if not found)
 	 */
-	virtual unsigned int classify_sync(const unsigned int* header, int priority) = 0;
+	virtual unsigned int classify_sync(const unsigned int* header, int priority);
 
 	/**
 	 * @brief Prints debug information
 	 * @param verbose Set the verbosity level of printing
 	 */
-	virtual void print(uint32_t verbose=1) const = 0;
-
-	virtual ~GenericClassifier() {}
+	virtual void print(uint32_t verbose=1) const;
 
 	/**
 	 * @brief Returns a string representation of this
 	 */
-	virtual const std::string to_string() const = 0;
+	virtual const std::string to_string() const;
 
-	/**
-	 * @brief Adds new listener to this
-	 */
-	void add_listener(GenericClassifierListener& listener) {
-		_listeners.push_back(&listener);
-	}
-
-	/**
-	 * @brief Resets the all classifier counters
-	 */
-	virtual void reset_counters() { _packet_counter = 0; }
-
-	/**
-	 * @brief Advance the packet counter. Should be used when skipping 
-	 * classification of packets, such as with caches.
-	 */
-	virtual void advance_counter() { _packet_counter++; }
-
-	/**
-	 * @brief Sets any additional arguments to pass to listeners on new result
-	 */
-	virtual void set_additional_args (void* args) {
-		_additional_args = args;
-	}
+protected:
+	struct timespec start_time, end_time;
+	void* my_rules;
+	void* tm_classifier;
+	uint32_t build_time;
+	uint32_t limit;
 };
+
+
+

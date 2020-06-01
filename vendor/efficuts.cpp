@@ -2579,7 +2579,7 @@ int EffiCuts::build(const std::list<openflow_rule>& rules) {
  * @returns The matching rule action/priority (or 0xffffffff if not found)
  * @note Added by Alon Rashelbach
  */
-uint32_t EffiCuts::classify_sync(const uint32_t* header) {
+uint32_t EffiCuts::classify_sync(const uint32_t* header, int priority) {
 	return ColorOfTrees(_trees, header);
 }
 
@@ -2589,13 +2589,13 @@ uint32_t EffiCuts::classify_sync(const uint32_t* header) {
  * @returns A unique id for the packet
  * @note Added by Alon Rashelbach
  */
-uint32_t EffiCuts::classify_async(const uint32_t* header) {
+uint32_t EffiCuts::classify_async(const uint32_t* header, int priority) {
 	int result = -1;
 	uint32_t packet_id = 0xffffffff;
 
 	// Lookup only valid packets
 	if (header != nullptr) {
-		result = classify_sync(header);
+		result = classify_sync(header, priority);
 		packet_id = _packet_counter++;
 	}
 

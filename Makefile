@@ -23,13 +23,14 @@
 SRC_DIR		?=		src
 BIN_DIR		?=		bin
 TOOLS_DIR	?=		tools
+VENDOR_DIR	?=		vendor
 INCLUDE_DIR	?=		include
 
 CXX			?=		g++
 CXXFLAGS	?=		-std=c++11 -pthread -Wall -fPIC -DNOPYTHON
 DBGFLAGS 	?= 		-g
 SIMDFLAGS	?=		-mavx2 -mfma
-INCLUDES	?= 		-I $(BIN_DIR) -I $(INCLUDE_DIR) -I tuplemerge
+INCLUDES	?= 		-I $(BIN_DIR) -I $(INCLUDE_DIR) -I tuplemerge -I vendor
 LIBRARIES	?=		-L $(BIN_DIR)
 RM			?=		rm -f
 
@@ -46,6 +47,7 @@ SOURCES			+=$(wildcard $(SRC_DIR)/*.cpp)
 
 # Generate a list of objects
 OBJECTS 		+=$(patsubst $(SRC_DIR)/%.cpp,$(BIN_DIR)/%.o,$(wildcard $(SRC_DIR)/*.cpp))
+OBJECTS 		+=$(patsubst $(VENDOR_DIR)/%.cpp,$(BIN_DIR)/%.o,$(wildcard $(VENDOR_DIR)/*.cpp))
 
 # Generate a list of executable files
 EXECUTABLES		:=$(patsubst $(TOOLS_DIR)/%.cpp,$(BIN_DIR)/%.exe,$(wildcard $(TOOLS_DIR)/*.cpp))
