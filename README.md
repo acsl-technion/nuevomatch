@@ -7,7 +7,7 @@ The official source code for NuevoMatch as described in "A Computational Approac
 General prerequisites:
 * A Linux operating system / WSL for Windows operating system
 * Intel CPU that supports AVX2 and FMA extensions (the configuration script will check that for you)
-* g++ compiler that supports C++11
+* g++ compiler that supports C++14
 * GNU Make
 * Python 3.5 or 3.6
 * Python3-dev package (must be compatible with Python 3.5 or 3.6)
