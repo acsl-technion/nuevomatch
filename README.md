@@ -9,8 +9,8 @@ General prerequisites:
 * Intel CPU that supports AVX2 and FMA extensions (the configuration script will check that for you)
 * g++ compiler that supports C++14
 * GNU Make
-* Python 3.5 or 3.6
-* Python3-dev package (must be compatible with Python 3.5 or 3.6)
+* Python 3.5+
+* Python3-dev package (must be compatible with Python 3.5+)
 * Make sure both hyperthreading and frequency scaling are disabled for maximum performance.
 
 Python prerequisites:
