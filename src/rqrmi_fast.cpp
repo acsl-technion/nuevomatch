@@ -121,7 +121,7 @@ void RQRMIFast::evaluate(wide_scalar_t& inputs, wide_scalar_t& status, wide_scal
 	// Next index of submodel in stage, per input
 	wide_scalar_t next_idx;
 	// A collection of submodels
-	submodel_collection_t submodels;
+	submodel_collection_t submodels {};
 
 	// Holds a vector of submodels input normalization factors
 	wide_scalar_t input_mean, input_stddev;
