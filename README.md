@@ -59,13 +59,35 @@ Microbenchmarks:
 * ``bench_echo.exe``: Tests the communication performance between two threads.
 * ``bench_reducer.exe``: Tests the communication performance between several threads.
 
+# A Full Example
+
+You can use the tools to run NuevoMatch as follows:
+
+1. Get a ClassBench ruleset. You can generate one using the [original tool](http://www.arl.wustl.edu/classbench/db_generator.tar.gz).
+2. Train a model using ``./bin/nuevomatch.py`` (takes about 40 minutes):
+
+```./bin/nuevomatch.py -f my_ruleset.txt -o my_model.data --min-size 64 --max-error 64```
+
+3. Use ``./bin/tool_trace_generator.exe`` to generate a trace from a ClassBench ruleset:
+
+```./bin/tool_trace_generator.exe -f my_ruleset.txt -n 10000000 -o my_trace.txt```
+
+4. You can shuffle the trace according to Zipf temporal locality:
+
+```./bin/tool_locality.exe --trace-file my_trace.txt --output-trace my_trace_modified.txt --zipf --alpha 0.99```
+
+5. Use ``./bin/tool_classifier.exe`` to test NuevoMatch:
+
+```./bin/tool_classifier.exe -m nuevomatch -l -in my_model.data --trace my_trace_modified.txt --parallel 1 --trace-silent --max-subsets 1 --remainder-type tuplemerge --force-remainder-build -v 3```
+
+
 # License and Credits
 
 MIT license. See LICENSE.md for more details.
 
 ____
 
-[1] A computational approach to packet classification
+[1] A computational approach to packet classification (ACM SIGCOMM, 2020)
 
 [2] Classbench: A packet classification benchmark (ACM TON, 2007)
 
