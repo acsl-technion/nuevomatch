@@ -31,7 +31,7 @@
 /**
  * @brief For clean code of fast multiple add
  */
-#ifdef NO_SIMD
+#ifdef NO_RQRMI_OPT
 	#define FMA(a,b,c) 				\
 		a = (a*b)+c;
 #elif __AVX512F__
@@ -53,7 +53,7 @@
 /**
  * @brief General defines that change according to available SIMD engine
  */
-#ifdef NO_SIMD
+#ifdef NO_RQRMI_OPT
 #	define SIMD_WIDTH 1
 #	define PS_REG float
 #	define EPU_REG unsigned int

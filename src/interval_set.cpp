@@ -37,7 +37,9 @@ using namespace std;
 /**
  * @brief A static register that holds 0xff in all of its bytes
  */
+#ifndef NO_RQRMI_OPT
 EPU_REG ff_vector;
+#endif
 
 /**
  * @brief Initialize new interval-set of specific index
@@ -370,7 +372,9 @@ void IntervalSet<N>::update_vlidation_phase_params() {
 #endif
 
 	// Initialize helper variables/registers for validation phase
+#ifndef NO_RQRMI_OPT
 	ff_vector = _mm256_set1_epi32(0xffffffff);
+#endif
 
 	// Calculate how many vector operations are required for validation
 	_vec_ops = this->_num_of_validation_phases / scalars_in_vector;
@@ -468,11 +472,20 @@ classifier_output_t IntervalSet<N>::do_validation(const uint32_t* packet, uint32
 
 	uint32_t* cursor_lo = &this->_validation_db[rule_idx*_rule_size];
 	uint32_t* cursor_hi = cursor_lo + _validation_low_size;
-	uint32_t accumulated_result = 0;
 
+#if NO_RQRMI_OPT
+	// For each column
+	for (uint32_t f=0; f<_F; ++f) {
+    if (packet[f] < *cursor_lo || packet[f] > *cursor_hi) return {-1, -1};
+    cursor_lo++;
+    cursor_hi++;
+  }
+#else
 #ifndef __AVX2__
 #error "NuevoMatch validation phase currently supports AVX2 extension only. Compile with -mavx2 with supported machines"
 #endif
+	uint32_t accumulated_result = 0;
+
 	// TODO - write again for SSE and AVX512
 	__m256i remainder_mask = _mm256_loadu_si256((__m256i const*)_remainder_mask);
 
@@ -526,6 +539,8 @@ classifier_output_t IntervalSet<N>::do_validation(const uint32_t* packet, uint32
 
 	// In case the current column does not pass validation, stop
 	if (accumulated_result) return {-1, -1};
+#endif
+
 
 	// At this point, all columns are valid
 	int priority = *cursor_hi;

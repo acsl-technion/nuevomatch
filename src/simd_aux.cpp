@@ -28,9 +28,11 @@
  * @brief Returns a string representation of single-precision float vector
  */
 std::string simd_ps_vector_logger(PS_REG v) {
+#ifndef NO_RQRMI_OPT
 	union {float f; int i;} fp;
+#endif
 	std::stringstream ss;
-#ifdef NO_SIMD
+#ifdef NO_RQRMI_OPT
 	ss<<"["<<v<<"]";
 #elif __AVX512F__
 	float f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14,f15;
@@ -80,9 +82,11 @@ std::string simd_ps_vector_logger(PS_REG v) {
  * @brief Returns a string representation of unsigned int vector
  */
 std::string simd_epu_vector_logger(EPU_REG v) {
+#ifndef NO_RQRMI_OPT
 	union {unsigned int f; int i;} fp;
+#endif
 	std::stringstream ss;
-#ifdef NO_SIMD
+#ifdef NO_RQRMI_OPT
 	ss<<"["<<v<<"]";
 #elif __AVX512F__
 	unsigned int f0,f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13,f14,f15;
