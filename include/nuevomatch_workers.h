@@ -29,8 +29,6 @@
 #include <nuevomatch_config.h>
 #include <interval_set.h>
 
-
-
 /**
  * @brief An abstract class for NuevoMatch worker listener.
  *        The workers publish their results to these listeners.
