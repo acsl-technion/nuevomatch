@@ -197,8 +197,8 @@ protected:
 				#else
 					for (uint32_t k=0; k<num_of_isets; ++k) {
 						for (position[k]=l_bound[k]; position[k]<u_bound[k]; ++position[k]) {
-							uint32_t current_value = _isets[k]->get_iset()->get_index(position[k]) <= key[k];
-							uint32_t next_value = _isets[k]->get_iset()->get_index(position[k]+1) > key[k];
+							uint32_t current_value = instance->_isets[k]->get_index(position[k]) <= key[k];
+							uint32_t next_value = instance->_isets[k]->get_index(position[k]+1) > key[k];
 							if (current_value & next_value) {
 								break;
 							}
